@@ -133,3 +133,47 @@ into probabilities, and a decoding strategy picks one token.
   after failures, synthetic data generation and RL rollouts.
 - **Temperature:** low for extraction, classification and tool calls; higher for generating
   diverse candidates. Tune only against an eval.
+
+## 1.4 Messages, system prompts and prompting
+
+### Anatomy of a request
+
+- **Model** (a dated snapshot), **system prompt** (standing instructions), **messages**
+  (alternating `user`/`assistant` turns made of content blocks: text, images, tool calls, tool
+  results), **tools** (Phase 2) and **parameters** (`max_tokens`, temperature, stop sequences).
+- The response carries content blocks, a **stop reason** and **usage** (token counts).
+- Providers differ in shape: where the system prompt goes, how tool calls and results are
+  structured. A shared client normalizes this.
+- The provider renders everything into one token sequence using the model's **chat template**.
+  Roles carry trained authority — system above user above tool results — an **instruction
+  hierarchy** that matters for security (Phase 8).
+- The API is stateless: the application stores the conversation and decides what each call
+  includes.
+
+### The system prompt as policy
+
+Cover role and context, the task and what success looks like, constraints with their reasons,
+output format, and when to use tools. Aim between brittle if/else rules and vague slogans:
+clear principles plus the reasoning behind them.
+
+### Prompting principles
+
+- **Be clear and direct.** Brief the model like a capable colleague new to the project.
+- **Give the reason for each rule.** The model applies reasons to cases the rule never names,
+  and they supply an honest alternative to the forbidden action.
+- **State what to do, not only what to avoid.** Naming the unwanted behavior can prime it.
+- **Use varied examples.** Models copy every shared feature of their examples — length, tone,
+  format, label balance — not just the intended pattern. Include hard cases; shuffle order.
+- **Structure long prompts** with XML tags or headings to keep instructions, data and examples
+  separate.
+- **Use structured outputs** (1.5) for anything code will parse.
+- **Treat prompts as code.** Version them, change one thing at a time, judge changes with evals.
+
+Example. Weak: "Don't be verbose. Don't use bullet points. Don't mention competitors."
+Stronger:
+
+> You answer customers of Acme Billing in a chat widget shown on phone screens. Reply in two to
+> four short sentences of plain prose; long or list-formatted replies are hard to read in the
+> widget. Help only with Acme's products. If a customer asks about another vendor, say you can
+> only speak to Acme and point them to the Acme feature that meets their need, because
+> comparisons we can't verify may be inaccurate.
