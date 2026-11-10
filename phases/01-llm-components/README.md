@@ -94,3 +94,42 @@ What the numbers show:
   at the start. Mitigate by re-injecting key instructions near the end and compacting history.
 - **Enforce hard constraints in code, not in the prompt.** If an action must never happen, the
   tool should refuse it. The prompt explains the rule; the code guarantees it.
+
+## 1.3 Sampling and non-determinism
+
+### Decoding
+
+At each step the model produces a score (logit) for every vocabulary token; softmax turns these
+into probabilities, and a decoding strategy picks one token.
+
+- **Greedy** takes the most likely token. **Sampling** draws from the distribution.
+- **Temperature** divides the logits: below 1 sharpens the distribution, above 1 flattens it,
+  0 is effectively greedy.
+- **top-p** samples from the smallest set of tokens whose probability sums to p; **top-k**
+  from the k most likely. Some reasoning models fix these parameters or ignore them.
+
+### Why temperature 0 is not deterministic
+
+- **Floating-point addition is not associative**, and GPU kernels change summation order with
+  batch composition, so a request's numerics depend on concurrent traffic
+  ([Thinking Machines, 2025](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/)).
+  Mixture-of-experts routing can depend on the batch too.
+- **Small differences compound.** A flip between near-tied tokens changes everything after it.
+- **Models change behind aliases.** Pin dated snapshot IDs. A `seed` parameter, where offered,
+  is best-effort.
+
+### Engineering consequences
+
+- **Assert properties, not exact strings:** parses, matches the schema, required fields
+  present, values in allowed sets.
+- **Separate testing code from evaluating the model.** Unit tests replay recorded responses:
+  fast, free, deterministic, and they cover parsing, errors and retries. Evals run many inputs,
+  several times each, and report rates with uncertainty.
+- **Input variation dominates.** Even a deterministic model needs many eval cases; one run on
+  one input says nothing about the rest.
+- **Reproduce through logging.** Record model snapshot, parameters, full prompt and response for
+  every call.
+- **Use variance deliberately.** Diverse samples enable voting, best-of-n selection, exploration
+  after failures, synthetic data generation and RL rollouts.
+- **Temperature:** low for extraction, classification and tool calls; higher for generating
+  diverse candidates. Tune only against an eval.
