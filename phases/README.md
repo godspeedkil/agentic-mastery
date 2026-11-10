@@ -8,7 +8,7 @@ Layout of a phase folder:
 ```
 NN-name/
 ├── pyproject.toml
-├── NOTES.md      # concepts in your own words + checkpoint answers
+├── README.md     # the guide: concepts first, then the lab and its results
 ├── src/          # lab code
 ├── tests/
 └── results/      # benchmarks, eval outputs, charts (summaries, not raw dumps)

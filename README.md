@@ -1,7 +1,7 @@
 # Agentic Mastery
 
 A hands-on path from LLM fundamentals to production-grade, evaluated and RL-trained agents.
-Every phase pairs concepts with a lab and ends with a checkpoint before moving on.
+Each phase is a self-contained guide (its folder's README) followed by a lab built step by step.
 The git history is the record: one branch and PR per phase, tagged `phase-NN` when complete.
 
 ## Progress
@@ -25,7 +25,7 @@ The git history is the record: one branch and PR per phase, tagged `phase-NN` wh
 
 ```
 core/       shared code that grows across phases (LLM client, tracing, utilities)
-phases/     one folder per phase: NOTES.md, src/, tests/, results/
+phases/     one folder per phase: README.md, src/, tests/, results/
 capstone/   final project
 ```
 
@@ -53,8 +53,8 @@ uv run poe check              # lint, format check and tests — exactly what CI
 
 - Branch per phase: `phase-NN-name`, merged via PR (merge commit, not squash), tagged `phase-NN`.
 - Conventional Commits with a phase scope, e.g. `feat(p02): add loop detection`.
-- One job per commit. A typical phase: `docs` (scaffold + notes) → `feat` (lab core) →
-  `test` (tests + results) → `refactor`/`perf` (improvement round) → `docs` (checkpoint write-up).
+- One job per commit. A typical phase: `docs` (guide sections) → `feat` (lab core) →
+  `test` (tests + results) → `refactor`/`perf` (improvement round) → `docs` (results and findings).
 - Code reused by later phases moves into `core/` in its own `refactor(core)` commit.
 
 ## License
