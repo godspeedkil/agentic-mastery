@@ -58,3 +58,39 @@ What the numbers show:
   biggest levers. Prompt caching (1.7) changes the calculation for repeated tokens.
 - **Compare models on cost per completed task, not price per token.** A model that finishes in
   fewer steps or writes shorter outputs can cost less even at a higher rate.
+
+## 1.2 Context windows and degradation
+
+### The window
+
+- The **context window** is the maximum tokens per request, shared by input and output.
+  A separate, much smaller limit caps output tokens.
+- Exceeding it fails the request or, in some frameworks, silently drops content. Agent history
+  grows every step (1.1), so long-running agents reach the limit unless something manages it.
+
+### Effective length is shorter than advertised
+
+- **Lost in the middle** ([Liu et al., 2023](https://arxiv.org/abs/2307.03172)): recall is best
+  for information at the start and end of the context, worst in the middle.
+- **Needle-in-a-haystack overstates ability.** It tests finding one distinctive phrase by
+  keyword. Benchmarks with multi-hop questions, aggregation and no keyword overlap
+  ([RULER](https://arxiv.org/abs/2404.06654), [NoLiMa](https://arxiv.org/abs/2502.05167))
+  show effective length well below the advertised window.
+- **Context rot** ([Chroma, 2025](https://research.trychroma.com/context-rot)): quality drops
+  as input grows, even on simple tasks, and faster when the context contains distractors —
+  content similar to the answer but wrong.
+- Intuition: attention is a fixed budget spread across all tokens, similar content competes for
+  it, and models see far fewer very long examples in training.
+
+### Rules of thumb
+
+- **Fewer, higher-signal tokens beat more tokens.** Extra context costs money, adds latency
+  (prefill time grows with input) and lowers quality.
+- **Placement matters.** Put long documents first and the question last. Wrap each document in
+  tags with an ID (`<doc id="7">…</doc>`) so the model can separate and cite them.
+- **Distractors hurt more than noise.** Ten near-duplicates do more damage than ten unrelated
+  documents; retrieve less, but more precisely.
+- **The agent's own history dilutes its instructions.** Long histories weaken constraints given
+  at the start. Mitigate by re-injecting key instructions near the end and compacting history.
+- **Enforce hard constraints in code, not in the prompt.** If an action must never happen, the
+  tool should refuse it. The prompt explains the rule; the code guarantees it.
