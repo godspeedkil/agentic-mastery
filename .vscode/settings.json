@@ -11,5 +11,6 @@
         ]
     },
     "ruff.importStrategy": "fromEnvironment",
-    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python"
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.terminal.useEnvFile": true
 }

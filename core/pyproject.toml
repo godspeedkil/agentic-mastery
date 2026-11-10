@@ -3,7 +3,10 @@ name = "core"
 version = "0.1.0"
 description = "Shared building blocks reused across phases (LLM client, tracing, utilities)."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+]
 
 [build-system]
 requires = ["hatchling"]
