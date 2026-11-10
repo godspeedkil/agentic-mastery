@@ -1,0 +1,43 @@
+[project]
+name = "agentic-mastery"
+version = "0.1.0"
+description = "Hands-on learning path: from LLM fundamentals to production and RL-trained agents."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["core"]
+
+[tool.uv.workspace]
+# Each phase becomes its own workspace member so its dependencies stay isolated
+members = ["core", "phases/*"]
+
+[tool.uv.sources]
+core = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "poethepoet>=0.49.0",
+    "pre-commit>=4.7.0",
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core"]
+
+[tool.pytest.ini_options]
+testpaths = ["core/tests", "phases"]
+addopts = "-q"
+
+[tool.poe.tasks]
+lint = { cmd = "ruff check .", help = "Lint with ruff" }
+format-check = { cmd = "ruff format --check .", help = "Fail if any file needs formatting" }
+test = { cmd = "pytest", help = "Run the test suite" }
+check = { sequence = ["lint", "format-check", "test"], help = "Everything CI runs" }
+fix = { sequence = [{ cmd = "ruff check --fix ." }, { cmd = "ruff format ." }], help = "Auto-fix lint issues and format" }
