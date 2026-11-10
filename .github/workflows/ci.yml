@@ -21,9 +21,5 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - name: Install
         run: uv sync --all-packages --locked
-      - name: Lint
-        run: uv run ruff check .
-      - name: Format check
-        run: uv run ruff format --check .
-      - name: Test
-        run: uv run pytest
+      - name: Check (lint, format, tests)
+        run: uv run poe check
