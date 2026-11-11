@@ -2,11 +2,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import openai
 import pytest
 from openai.types.responses import Response as OpenAIResponse
 
 from core.llm import Message, Request
 from core.llm import openai_provider as provider_module
+from core.llm.errors import ProviderUnavailableError, RateLimitedError
 from core.llm.openai_provider import OpenAIProvider, from_openai_response, to_openai_params
 from core.settings import Settings
 
@@ -119,3 +121,26 @@ def test_missing_api_key_fails_loudly(monkeypatch):
     monkeypatch.setattr(provider_module, "get_settings", lambda: Settings(_env_file=None))
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         OpenAIProvider()
+
+
+def failing_client(exc: Exception) -> SimpleNamespace:
+    def create(**kwargs):
+        raise exc
+
+    return SimpleNamespace(responses=SimpleNamespace(create=create))
+
+
+def test_sdk_status_errors_become_core_errors():
+    response = SimpleNamespace(status_code=429, headers={"retry-after": "2"}, request=None)
+    sdk_error = openai.RateLimitError("slow down", response=response, body=None)
+    provider = OpenAIProvider(client=failing_client(sdk_error))
+    with pytest.raises(RateLimitedError) as caught:
+        provider.complete(Request(model="m", messages=[Message.user("hi")]))
+    assert caught.value.retry_after == 2.0
+    assert caught.value.__cause__ is sdk_error
+
+
+def test_sdk_timeouts_become_provider_unavailable():
+    provider = OpenAIProvider(client=failing_client(openai.APITimeoutError(request=None)))
+    with pytest.raises(ProviderUnavailableError):
+        provider.complete(Request(model="m", messages=[Message.user("hi")]))

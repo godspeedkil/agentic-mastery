@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import anthropic
 import pytest
 from anthropic.types import Message as AnthropicMessage
 
@@ -12,6 +13,7 @@ from core.llm.anthropic_provider import (
     from_anthropic_message,
     to_anthropic_params,
 )
+from core.llm.errors import ProviderUnavailableError, RateLimitedError
 from core.settings import Settings
 
 FIXTURES = Path(__file__).parent / "fixtures" / "anthropic"
@@ -98,3 +100,26 @@ def test_missing_api_key_fails_loudly(monkeypatch):
     monkeypatch.setattr(provider_module, "get_settings", lambda: Settings(_env_file=None))
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         AnthropicProvider()
+
+
+def failing_client(exc: Exception) -> SimpleNamespace:
+    def create(**kwargs):
+        raise exc
+
+    return SimpleNamespace(messages=SimpleNamespace(create=create))
+
+
+def test_sdk_status_errors_become_core_errors():
+    response = SimpleNamespace(status_code=429, headers={"retry-after": "2"}, request=None)
+    sdk_error = anthropic.RateLimitError("slow down", response=response, body=None)
+    provider = AnthropicProvider(client=failing_client(sdk_error))
+    with pytest.raises(RateLimitedError) as caught:
+        provider.complete(Request(model="m", messages=[Message.user("hi")]))
+    assert caught.value.retry_after == 2.0
+    assert caught.value.__cause__ is sdk_error
+
+
+def test_sdk_timeouts_become_provider_unavailable():
+    provider = AnthropicProvider(client=failing_client(anthropic.APITimeoutError(request=None)))
+    with pytest.raises(ProviderUnavailableError):
+        provider.complete(Request(model="m", messages=[Message.user("hi")]))

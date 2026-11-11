@@ -6,6 +6,7 @@ import anthropic
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import Usage as AnthropicUsage
 
+from core.llm.errors import ProviderUnavailableError, error_from_status
 from core.llm.records import Usage
 from core.llm.types import Request, Response, StopReason, TextBlock
 from core.settings import get_settings
@@ -85,5 +86,12 @@ class AnthropicProvider:
         )
 
     def complete(self, request: Request) -> Response:
-        message = self._client.messages.create(**to_anthropic_params(request))
+        try:
+            message = self._client.messages.create(**to_anthropic_params(request))
+        except anthropic.APIStatusError as exc:
+            raise error_from_status(
+                "anthropic", exc.status_code, exc.message, exc.response.headers
+            ) from exc
+        except anthropic.APIConnectionError as exc:  # includes timeouts
+            raise ProviderUnavailableError(str(exc), provider="anthropic") from exc
         return from_anthropic_message(message)
