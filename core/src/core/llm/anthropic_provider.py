@@ -1,12 +1,13 @@
 """Adapter between core.llm types and the Anthropic Messages API."""
 
+from contextlib import AbstractContextManager
 from typing import Any
 
 import anthropic
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import Usage as AnthropicUsage
 
-from core.llm.errors import ProviderUnavailableError, error_from_status
+from core.llm.errors import translate_sdk_errors
 from core.llm.records import Usage
 from core.llm.types import Request, Response, StopReason, TextBlock
 from core.settings import get_settings
@@ -86,12 +87,11 @@ class AnthropicProvider:
         )
 
     def complete(self, request: Request) -> Response:
-        try:
+        with self._translated_errors():
             message = self._client.messages.create(**to_anthropic_params(request))
-        except anthropic.APIStatusError as exc:
-            raise error_from_status(
-                "anthropic", exc.status_code, exc.message, exc.response.headers
-            ) from exc
-        except anthropic.APIConnectionError as exc:  # includes timeouts
-            raise ProviderUnavailableError(str(exc), provider="anthropic") from exc
         return from_anthropic_message(message)
+
+    def _translated_errors(self) -> AbstractContextManager[None]:
+        return translate_sdk_errors(
+            "anthropic", anthropic.APIStatusError, anthropic.APIConnectionError
+        )

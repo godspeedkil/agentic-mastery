@@ -1,12 +1,13 @@
 """Adapter between core.llm types and the OpenAI Responses API."""
 
+from contextlib import AbstractContextManager
 from typing import Any
 
 import openai
 from openai.types.responses import Response as OpenAIResponse
 from openai.types.responses import ResponseUsage as OpenAIUsage
 
-from core.llm.errors import ProviderUnavailableError, error_from_status
+from core.llm.errors import translate_sdk_errors
 from core.llm.records import Usage
 from core.llm.types import Request, Response, StopReason, TextBlock
 from core.settings import get_settings
@@ -100,12 +101,9 @@ class OpenAIProvider:
         )
 
     def complete(self, request: Request) -> Response:
-        try:
+        with self._translated_errors():
             response = self._client.responses.create(**to_openai_params(request))
-        except openai.APIStatusError as exc:
-            raise error_from_status(
-                "openai", exc.status_code, exc.message, exc.response.headers
-            ) from exc
-        except openai.APIConnectionError as exc:  # includes timeouts
-            raise ProviderUnavailableError(str(exc), provider="openai") from exc
         return from_openai_response(response)
+
+    def _translated_errors(self) -> AbstractContextManager[None]:
+        return translate_sdk_errors("openai", openai.APIStatusError, openai.APIConnectionError)

@@ -1,6 +1,7 @@
 """Provider-independent errors, classified by whether retrying the same request can help."""
 
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 
 from core.llm.records import Provider
 
@@ -70,3 +71,23 @@ def error_from_status(
     if should_retry == "true" or status_code >= 500 or status_code in RETRYABLE_CLIENT_STATUSES:
         return ProviderUnavailableError(message, **details)
     return RequestRejectedError(message, **details)
+
+
+@contextmanager
+def translate_sdk_errors(
+    provider: Provider, status_error: type[Exception], connection_error: type[Exception]
+) -> Generator[None]:
+    """Re-raise an SDK's HTTP-status and connection errors as core errors.
+
+    Both SDKs are generated from the same template, so their status errors carry
+    `status_code`, `message` and `response.headers`, and timeouts subclass the
+    connection error.
+    """
+    try:
+        yield
+    except status_error as exc:
+        raise error_from_status(
+            provider, exc.status_code, exc.message, exc.response.headers
+        ) from exc
+    except connection_error as exc:
+        raise ProviderUnavailableError(str(exc), provider=provider) from exc
