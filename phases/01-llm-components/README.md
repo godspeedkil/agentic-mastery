@@ -226,3 +226,55 @@ validation error back and retry once or twice.
 - **Rigid formats can reduce reasoning quality**
   ([Tam et al., 2024](https://arxiv.org/abs/2408.02442)). For hard tasks, reason first, then
   emit the structure.
+
+## 1.6 Reasoning models
+
+### What changes
+
+Reasoning models generate a chain of thought before answering, trained with reinforcement
+learning on verifiable tasks. They trade test-time compute for quality.
+
+- **Thinking tokens are billed as output** and add latency; they can far exceed the visible answer.
+- **Effort is controllable** through a token budget or effort level, depending on the provider;
+  some models adapt it automatically.
+- **Visibility varies:** full reasoning, a summary, or nothing.
+- **Tool loops carry reasoning across turns.** Models can think between tool calls, and
+  providers may require earlier reasoning to be passed back unchanged. Follow each provider's
+  rules and log usage to see what is billed.
+
+### Cost impact
+
+The 1.1 agent (25 steps) with 2,000 thinking tokens per step:
+
+| Scenario | Input | Output | Total |
+| --- | --- | --- | --- |
+| No thinking | $1.69 | $0.11 | $1.80 |
+| Thinking, not re-sent | $1.69 | $0.86 | $2.55 |
+| Thinking re-sent as history | $3.64 | $0.86 | $4.50 |
+
+Output grows from 6% to a third of the bill, and reasoning that accumulates in history joins
+the n² term.
+
+### When to use one
+
+| Worth it | Usually not |
+| --- | --- |
+| Multi-step logic, math, code | Extraction, classification, formatting |
+| Planning, task decomposition | Latency-critical steps |
+| Ambiguous tool choice | High-volume repetitive steps |
+| Complex or conflicting instructions | Tasks a small model already handles |
+
+- **Route per step.** Reasoning model for judgment, smaller models for routine steps, plain
+  code for anything deterministic such as lookups.
+- **Make judgments checkable.** Ask for structured decisions that cite their sources.
+- **Set effort with an eval**, not intuition.
+
+### Prompting
+
+- Give the goal, constraints and success criteria; don't script the steps. Detailed procedures
+  lock the model into one method and spend its thinking on compliance. Keep mandatory steps only
+  where required, stated with their reason.
+- "Think step by step" is redundant. Fewer examples are needed.
+- **Visible reasoning is not guaranteed to be faithful** to what drove the answer
+  ([Anthropic, 2025](https://www.anthropic.com/research/reasoning-models-dont-say-think)).
+  Use it for debugging, not as an explanation.
