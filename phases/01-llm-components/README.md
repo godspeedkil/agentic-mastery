@@ -177,3 +177,52 @@ Stronger:
 > widget. Help only with Acme's products. If a customer asks about another vendor, say you can
 > only speak to Acme and point them to the Acme feature that meets their need, because
 > comparisons we can't verify may be inaccurate.
+
+## 1.5 Structured outputs
+
+Code that acts on model output needs that output in a known shape.
+
+### Levels of guarantee
+
+| Approach | Guarantees | Does not guarantee |
+| --- | --- | --- |
+| Prompt only ("return JSON") | Nothing | Parsing, shape |
+| JSON mode | Valid JSON | Shape: fields may be missing or extra |
+| Schema-constrained decoding | Valid JSON matching the schema | Correct values |
+| Forced tool call | Arguments matching the tool schema | Correct values |
+
+Prefer schema-constrained decoding where the provider supports it.
+
+### How constrained decoding works
+
+The JSON Schema is compiled into a grammar; at each step the provider masks every token that
+would violate it. Limits:
+
+- Only a subset of JSON Schema is supported; unsupported keywords may be rejected or
+  silently ignored.
+- A new schema adds compilation latency on first use; providers cache it.
+- It guarantees shape, not truth.
+- Truncation (`max_tokens`) or a refusal still yields incomplete output. Check the stop
+  reason before parsing.
+
+### One schema definition
+
+Define the shape once as a Pydantic model: generate the JSON Schema for the request, validate
+the response into the same model. Validate what the schema cannot express (cross-field rules,
+values that must exist elsewhere) in code, and on failure run a bounded repair loop: send the
+validation error back and retry once or twice.
+
+### Schema design
+
+- **Descriptions are prompt text.** Write them as instructions.
+- **Use enums for categories**, lowercase, each value described. Include a value for cases
+  that don't fit cleanly (e.g. `mixed`) instead of forcing a choice.
+- **Represent "not present" as `null`, not a sentinel string.** `due_date: date | None` keeps
+  the type honest; a string like `"unknown"` breaks parsing and leaks into stored data.
+  Required fields without an escape hatch invite fabrication.
+- **Order fields deliberately.** Generation follows schema order; put evidence or reasoning
+  before the answer it should inform.
+- **Keep schemas small and flat.**
+- **Rigid formats can reduce reasoning quality**
+  ([Tam et al., 2024](https://arxiv.org/abs/2408.02442)). For hard tasks, reason first, then
+  emit the structure.
