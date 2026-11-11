@@ -6,7 +6,7 @@ import anthropic
 import pytest
 from anthropic.types import Message as AnthropicMessage
 
-from core.llm import Message, Request
+from core.llm import Message, Request, Response, TextDelta
 from core.llm import anthropic_provider as provider_module
 from core.llm.anthropic_provider import (
     AnthropicProvider,
@@ -17,6 +17,7 @@ from core.llm.errors import ProviderUnavailableError, RateLimitedError
 from core.settings import Settings
 
 FIXTURES = Path(__file__).parent / "fixtures" / "anthropic"
+REQUEST_HI = Request(model="m", messages=[Message.user("hi")])
 
 
 def load_message(name: str, **overrides) -> AnthropicMessage:
@@ -123,3 +124,42 @@ def test_sdk_timeouts_become_provider_unavailable():
     provider = AnthropicProvider(client=failing_client(anthropic.APITimeoutError(request=None)))
     with pytest.raises(ProviderUnavailableError):
         provider.complete(Request(model="m", messages=[Message.user("hi")]))
+
+
+class FakeMessageStream:
+    """Stands in for the SDK's stream manager: a context manager with text and a final message."""
+
+    def __init__(self, chunks: list[str], final: AnthropicMessage) -> None:
+        self.text_stream = iter(chunks)
+        self.final = final
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.closed = True
+
+    def get_final_message(self) -> AnthropicMessage:
+        return self.final
+
+
+def test_stream_yields_text_deltas_then_the_final_response():
+    final = load_message("message_with_thinking.json")
+    fake = FakeMessageStream(["The capital ", "is Paris."], final)
+    client = SimpleNamespace(messages=SimpleNamespace(stream=lambda **kwargs: fake))
+    events = list(AnthropicProvider(client=client).stream(REQUEST_HI))
+
+    assert events[:2] == [TextDelta(text="The capital "), TextDelta(text="is Paris.")]
+    assert isinstance(events[-1], Response)
+    assert events[-1].usage.reasoning_tokens == 80
+    assert fake.closed
+
+
+def test_stream_errors_are_translated():
+    def stream(**kwargs):
+        raise anthropic.APITimeoutError(request=None)
+
+    client = SimpleNamespace(messages=SimpleNamespace(stream=stream))
+    with pytest.raises(ProviderUnavailableError):
+        list(AnthropicProvider(client=client).stream(REQUEST_HI))

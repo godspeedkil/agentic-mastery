@@ -1,5 +1,6 @@
 """Adapter between core.llm types and the OpenAI Responses API."""
 
+from collections.abc import Generator
 from contextlib import AbstractContextManager
 from typing import Any
 
@@ -7,10 +8,13 @@ import openai
 from openai.types.responses import Response as OpenAIResponse
 from openai.types.responses import ResponseUsage as OpenAIUsage
 
-from core.llm.errors import translate_sdk_errors
+from core.llm.errors import ProviderUnavailableError, translate_sdk_errors
 from core.llm.records import Usage
-from core.llm.types import Request, Response, StopReason, TextBlock
+from core.llm.types import Request, Response, StopReason, StreamEvent, TextBlock, TextDelta
 from core.settings import get_settings
+
+FINAL_EVENTS = {"response.completed", "response.incomplete", "response.failed"}
+"""Stream events that carry the finished response."""
 
 INCOMPLETE_REASONS: dict[str, StopReason] = {
     "max_output_tokens": "max_tokens",
@@ -104,6 +108,25 @@ class OpenAIProvider:
         with self._translated_errors():
             response = self._client.responses.create(**to_openai_params(request))
         return from_openai_response(response)
+
+    def stream(self, request: Request) -> Generator[StreamEvent]:
+        final = None
+        with (
+            self._translated_errors(),
+            self._client.responses.create(**to_openai_params(request), stream=True) as events,
+        ):
+            for event in events:
+                if event.type == "response.output_text.delta":
+                    yield TextDelta(text=event.delta)
+                elif event.type in FINAL_EVENTS:
+                    final = event.response
+                elif event.type == "error":
+                    raise ProviderUnavailableError(
+                        f"stream error {event.code}: {event.message}", provider="openai"
+                    )
+        if final is None:
+            raise ProviderUnavailableError("stream ended without a response", provider="openai")
+        yield from_openai_response(final)
 
     def _translated_errors(self) -> AbstractContextManager[None]:
         return translate_sdk_errors("openai", openai.APIStatusError, openai.APIConnectionError)

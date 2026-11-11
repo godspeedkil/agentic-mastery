@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,13 +7,14 @@ import openai
 import pytest
 from openai.types.responses import Response as OpenAIResponse
 
-from core.llm import Message, Request
+from core.llm import Message, Request, Response, TextDelta
 from core.llm import openai_provider as provider_module
 from core.llm.errors import ProviderUnavailableError, RateLimitedError
 from core.llm.openai_provider import OpenAIProvider, from_openai_response, to_openai_params
 from core.settings import Settings
 
 FIXTURES = Path(__file__).parent / "fixtures" / "openai"
+REQUEST_HI = Request(model="m", messages=[Message.user("hi")])
 
 
 def load_response(name: str, **overrides) -> OpenAIResponse:
@@ -144,3 +146,38 @@ def test_sdk_timeouts_become_provider_unavailable():
     provider = OpenAIProvider(client=failing_client(openai.APITimeoutError(request=None)))
     with pytest.raises(ProviderUnavailableError):
         provider.complete(Request(model="m", messages=[Message.user("hi")]))
+
+
+def streaming_client(events: list) -> SimpleNamespace:
+    def create(**kwargs):
+        assert kwargs["stream"] is True
+        return nullcontext(events)
+
+    return SimpleNamespace(responses=SimpleNamespace(create=create))
+
+
+def text_delta(text: str) -> SimpleNamespace:
+    return SimpleNamespace(type="response.output_text.delta", delta=text)
+
+
+def test_stream_yields_text_deltas_then_the_final_response():
+    final = SimpleNamespace(
+        type="response.completed", response=load_response("response_with_reasoning.json")
+    )
+    events = [SimpleNamespace(type="response.created"), text_delta("Par"), text_delta("is."), final]
+    streamed = list(OpenAIProvider(client=streaming_client(events)).stream(REQUEST_HI))
+
+    assert streamed[:2] == [TextDelta(text="Par"), TextDelta(text="is.")]
+    assert isinstance(streamed[-1], Response)
+    assert streamed[-1].usage.cache_read_tokens == 1200
+
+
+def test_stream_error_event_raises_retryable_error():
+    events = [text_delta("Par"), SimpleNamespace(type="error", code="server_error", message="boom")]
+    with pytest.raises(ProviderUnavailableError, match="server_error"):
+        list(OpenAIProvider(client=streaming_client(events)).stream(REQUEST_HI))
+
+
+def test_stream_without_final_response_raises():
+    with pytest.raises(ProviderUnavailableError, match="without a response"):
+        list(OpenAIProvider(client=streaming_client([text_delta("Par")])).stream(REQUEST_HI))

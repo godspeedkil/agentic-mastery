@@ -1,5 +1,6 @@
 """Adapter between core.llm types and the Anthropic Messages API."""
 
+from collections.abc import Generator
 from contextlib import AbstractContextManager
 from typing import Any
 
@@ -9,7 +10,7 @@ from anthropic.types import Usage as AnthropicUsage
 
 from core.llm.errors import translate_sdk_errors
 from core.llm.records import Usage
-from core.llm.types import Request, Response, StopReason, TextBlock
+from core.llm.types import Request, Response, StopReason, StreamEvent, TextBlock, TextDelta
 from core.settings import get_settings
 
 STOP_REASONS: dict[str, StopReason] = {
@@ -90,6 +91,16 @@ class AnthropicProvider:
         with self._translated_errors():
             message = self._client.messages.create(**to_anthropic_params(request))
         return from_anthropic_message(message)
+
+    def stream(self, request: Request) -> Generator[StreamEvent]:
+        with (
+            self._translated_errors(),
+            self._client.messages.stream(**to_anthropic_params(request)) as stream,
+        ):
+            for text in stream.text_stream:
+                yield TextDelta(text=text)
+            message = stream.get_final_message()
+        yield from_anthropic_message(message)
 
     def _translated_errors(self) -> AbstractContextManager[None]:
         return translate_sdk_errors(

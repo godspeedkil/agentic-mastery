@@ -11,7 +11,9 @@ from core.llm.types import (
     Response,
     Role,
     StopReason,
+    StreamEvent,
     TextBlock,
+    TextDelta,
 )
 
 __all__ = [
@@ -30,7 +32,9 @@ __all__ = [
     "RetryPolicy",
     "Role",
     "StopReason",
+    "StreamEvent",
     "TextBlock",
+    "TextDelta",
     "Usage",
     "read_records",
 ]

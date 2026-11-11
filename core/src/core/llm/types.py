@@ -70,3 +70,15 @@ class Response(BaseModel):
     def text(self) -> str:
         """All text blocks joined; empty if there are none."""
         return "".join(block.text for block in self.content if isinstance(block, TextBlock))
+
+
+class TextDelta(BaseModel):
+    """A piece of answer text, as it arrives during streaming."""
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+
+
+StreamEvent = TextDelta | Response
+"""Adapters stream any number of TextDeltas, then exactly one final Response."""
