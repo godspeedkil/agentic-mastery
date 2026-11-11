@@ -40,6 +40,10 @@ class RequestRejectedError(LLMError):
     """The request itself is wrong (bad input, auth, unknown model); retrying won't help."""
 
 
+class StructuredOutputError(Exception):
+    """A structured answer was cut off, refused, or still invalid after repair attempts."""
+
+
 RETRYABLE_CLIENT_STATUSES = {408, 409}
 """Request timeout and lock conflict: client-range codes that are worth retrying."""
 

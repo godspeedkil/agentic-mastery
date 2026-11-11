@@ -1,6 +1,6 @@
 """Provider-agnostic LLM client: request/response types, call records, providers."""
 
-from core.llm.client import Completion, LLMClient, ProviderAdapter, RetryPolicy
+from core.llm.client import Completion, LLMClient, Parsed, ProviderAdapter, RetryPolicy
 from core.llm.ledger import Ledger, read_records
 from core.llm.pricing import ModelPrice, PriceTable
 from core.llm.records import CallRecord, Provider, Usage
@@ -24,6 +24,7 @@ __all__ = [
     "Ledger",
     "Message",
     "ModelPrice",
+    "Parsed",
     "PriceTable",
     "Provider",
     "ProviderAdapter",

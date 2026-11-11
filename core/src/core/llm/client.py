@@ -6,13 +6,13 @@ from collections.abc import Callable, Generator, Mapping
 from datetime import UTC, datetime
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, PositiveFloat, PositiveInt
+from pydantic import BaseModel, ConfigDict, PositiveFloat, PositiveInt, ValidationError
 
-from core.llm.errors import RetryableError
+from core.llm.errors import RetryableError, StructuredOutputError
 from core.llm.ledger import Ledger
 from core.llm.pricing import PriceTable
 from core.llm.records import CallRecord, Provider
-from core.llm.types import Request, Response, StreamEvent, TextDelta
+from core.llm.types import Message, Request, Response, StreamEvent, TextDelta
 
 
 class ProviderAdapter(Protocol):
@@ -32,6 +32,26 @@ class Completion(BaseModel):
 
     response: Response
     record: CallRecord
+
+
+class Parsed[T: BaseModel](BaseModel):
+    """A validated structured answer and every call it took to get it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    value: T
+    completions: list[Completion]
+    """The first call, followed by any repair calls."""
+
+
+UNPARSEABLE_STOP_REASONS = {"max_tokens", "refusal"}
+"""Stop reasons after which the answer cannot be a complete, valid object."""
+
+
+def repair_turns(answer: str, error: ValidationError) -> list[Message]:
+    """The invalid answer as the assistant's turn, then the validation error as feedback."""
+    feedback = f"Your answer did not validate:\n{error}\nReply with the corrected JSON only."
+    return [Message.assistant(answer), Message.user(feedback)]
 
 
 class RetryPolicy(BaseModel):
@@ -113,6 +133,47 @@ class LLMClient:
                     raise
                 self._sleep(wait)
         raise AssertionError("unreachable: the loop always returns or raises")
+
+    def parse[T: BaseModel](
+        self,
+        provider: str,
+        request: Request,
+        output_type: type[T],
+        *,
+        max_repairs: int = 1,
+    ) -> Parsed[T]:
+        """Ask for an answer matching `output_type` and validate it.
+
+        If validation fails, the error is sent back for a corrected answer, up to
+        `max_repairs` times. A cut-off, refused or empty answer is not repaired.
+        """
+        if max_repairs < 0:
+            raise ValueError("max_repairs cannot be negative")
+        request = request.model_copy(update={"output_type": output_type})
+        completions: list[Completion] = []
+        last_error: ValidationError | None = None
+        for _ in range(max_repairs + 1):
+            completion = self.complete(provider, request)
+            completions.append(completion)
+            response = completion.response
+            if response.stop_reason in UNPARSEABLE_STOP_REASONS:
+                raise StructuredOutputError(
+                    f"answer ended with stop reason {response.stop_reason!r}; not parsing it"
+                )
+            if not response.text:
+                raise StructuredOutputError("answer contained no text")
+            try:
+                value = output_type.model_validate_json(response.text)
+            except ValidationError as exc:
+                last_error = exc
+                request = request.model_copy(
+                    update={"messages": [*request.messages, *repair_turns(response.text, exc)]}
+                )
+                continue
+            return Parsed(value=value, completions=completions)
+        raise StructuredOutputError(
+            f"answer still invalid after {max_repairs} repair attempt(s)"
+        ) from last_error
 
     def _attempt(
         self,
