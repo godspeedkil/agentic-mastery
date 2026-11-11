@@ -355,7 +355,7 @@ wheels = [
 [[package]]
 name = "p01-llm-components"
 version = "0.1.0"
-source = { virtual = "phases/01-llm-components" }
+source = { editable = "phases/01-llm-components" }
 dependencies = [
     { name = "core" },
 ]
