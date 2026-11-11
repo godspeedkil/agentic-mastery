@@ -53,6 +53,8 @@ class Request(BaseModel):
     system: str | None = None
     max_tokens: PositiveInt = 1024
     stop_sequences: list[str] = Field(default_factory=list)
+    output_type: type[BaseModel] | None = None
+    """When set, the provider constrains the answer to this model's JSON Schema."""
 
 
 class Response(BaseModel):

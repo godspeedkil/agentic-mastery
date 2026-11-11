@@ -2,10 +2,12 @@ import json
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 import openai
 import pytest
 from openai.types.responses import Response as OpenAIResponse
+from pydantic import BaseModel
 
 from core.llm import Message, Request, Response, TextDelta
 from core.llm import openai_provider as provider_module
@@ -181,3 +183,22 @@ def test_stream_error_event_raises_retryable_error():
 def test_stream_without_final_response_raises():
     with pytest.raises(ProviderUnavailableError, match="without a response"):
         list(OpenAIProvider(client=streaming_client([text_delta("Par")])).stream(REQUEST_HI))
+
+
+class Verdict(BaseModel):
+    sentiment: Literal["positive", "neutral", "negative", "mixed"]
+    due: str | None = None
+
+
+def test_output_type_sends_a_strict_json_schema():
+    request = Request(model="m", messages=[Message.user("hi")], output_type=Verdict)
+    output_format = to_openai_params(request)["text"]["format"]
+    assert output_format["name"] == "Verdict"
+    assert output_format["strict"] is True
+    assert output_format["schema"]["additionalProperties"] is False
+    # Strict mode: every field is required; optional ones are nullable instead.
+    assert output_format["schema"]["required"] == ["sentiment", "due"]
+
+
+def test_no_output_type_sends_no_schema():
+    assert "text" not in to_openai_params(REQUEST_HI)

@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 import anthropic
 import pytest
 from anthropic.types import Message as AnthropicMessage
+from pydantic import BaseModel
 
 from core.llm import Message, Request, Response, TextDelta
 from core.llm import anthropic_provider as provider_module
@@ -163,3 +165,20 @@ def test_stream_errors_are_translated():
     client = SimpleNamespace(messages=SimpleNamespace(stream=stream))
     with pytest.raises(ProviderUnavailableError):
         list(AnthropicProvider(client=client).stream(REQUEST_HI))
+
+
+class Verdict(BaseModel):
+    sentiment: Literal["positive", "neutral", "negative", "mixed"]
+    due: str | None = None
+
+
+def test_output_type_sends_a_json_schema():
+    request = Request(model="m", messages=[Message.user("hi")], output_type=Verdict)
+    output_format = to_anthropic_params(request)["output_config"]["format"]
+    assert output_format["type"] == "json_schema"
+    assert output_format["schema"]["additionalProperties"] is False
+    assert output_format["schema"]["required"] == ["sentiment"]
+
+
+def test_no_output_type_sends_no_schema():
+    assert "output_config" not in to_anthropic_params(REQUEST_HI)

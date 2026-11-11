@@ -5,6 +5,7 @@ from contextlib import AbstractContextManager
 from typing import Any
 
 import openai
+from openai.lib._pydantic import to_strict_json_schema
 from openai.types.responses import Response as OpenAIResponse
 from openai.types.responses import ResponseUsage as OpenAIUsage
 
@@ -38,6 +39,15 @@ def to_openai_params(request: Request) -> dict[str, Any]:
     }
     if request.system is not None:
         params["instructions"] = request.system
+    if request.output_type is not None:
+        params["text"] = {
+            "format": {
+                "type": "json_schema",
+                "name": request.output_type.__name__,
+                "schema": to_strict_json_schema(request.output_type),
+                "strict": True,
+            }
+        }
     return params
 
 

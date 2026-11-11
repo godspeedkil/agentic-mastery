@@ -44,6 +44,9 @@ def to_anthropic_params(request: Request) -> dict[str, Any]:
         params["system"] = request.system
     if request.stop_sequences:
         params["stop_sequences"] = request.stop_sequences
+    if request.output_type is not None:
+        schema = anthropic.transform_schema(request.output_type)
+        params["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
     return params
 
 
