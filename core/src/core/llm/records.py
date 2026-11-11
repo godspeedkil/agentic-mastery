@@ -4,7 +4,15 @@ from datetime import UTC, datetime
 from typing import Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, computed_field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeInt,
+    PositiveInt,
+    computed_field,
+    model_validator,
+)
 
 Provider = Literal["anthropic", "openai"]
 
@@ -53,6 +61,8 @@ class CallRecord(BaseModel):
     provider: Provider
     model: str
     """The exact model ID sent to the API."""
+    attempt: PositiveInt = 1
+    """1 for the first try; retries of the same request count up from there."""
     usage: Usage = Field(default_factory=Usage)
     cost_usd: float | None = None
     """None when the model's price is unknown."""
