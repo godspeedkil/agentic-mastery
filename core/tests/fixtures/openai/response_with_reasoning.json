@@ -1,0 +1,42 @@
+{
+    "id": "resp_01ExampleRecordedResponse",
+    "object": "response",
+    "created_at": 1762800000,
+    "status": "completed",
+    "model": "gpt-example-2026-08-01",
+    "output": [
+        {
+            "type": "reasoning",
+            "id": "rs_01",
+            "summary": []
+        },
+        {
+            "type": "message",
+            "id": "msg_01",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "The capital of France is Paris.",
+                    "annotations": []
+                }
+            ]
+        }
+    ],
+    "parallel_tool_calls": true,
+    "tool_choice": "auto",
+    "tools": [],
+    "usage": {
+        "input_tokens": 1518,
+        "input_tokens_details": {
+            "cached_tokens": 1200,
+            "cache_write_tokens": 300
+        },
+        "output_tokens": 95,
+        "output_tokens_details": {
+            "reasoning_tokens": 80
+        },
+        "total_tokens": 1613
+    }
+}
