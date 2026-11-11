@@ -16,9 +16,9 @@ def test_request_requires_at_least_one_message():
         Request(model="m", messages=[])
 
 
-def test_request_rejects_out_of_range_temperature():
-    with pytest.raises(ValidationError):
-        Request(model="m", messages=[Message.user("x")], temperature=2.5)
+def test_request_rejects_unknown_fields():
+    with pytest.raises(ValidationError, match="temperature"):
+        Request(model="m", messages=[Message.user("x")], temperature=0.0)
 
 
 def test_message_rejects_empty_content():

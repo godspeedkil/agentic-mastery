@@ -43,15 +43,15 @@ class Message(BaseModel):
 
 
 class Request(BaseModel):
-    model_config = ConfigDict(frozen=True, use_attribute_docstrings=True)
+    """What to send. Sampling parameters are deliberately absent: current models reject them."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", use_attribute_docstrings=True)
 
     model: str
     """Exact model ID; prefer dated snapshots over aliases."""
     messages: list[Message] = Field(min_length=1)
     system: str | None = None
     max_tokens: PositiveInt = 1024
-    temperature: float | None = Field(default=None, ge=0, le=2)
-    """None keeps the provider's default. Adapters enforce narrower provider ranges."""
     stop_sequences: list[str] = Field(default_factory=list)
 
 
