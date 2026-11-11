@@ -278,3 +278,58 @@ the n² term.
 - **Visible reasoning is not guaranteed to be faithful** to what drove the answer
   ([Anthropic, 2025](https://www.anthropic.com/research/reasoning-models-dont-say-think)).
   Use it for debugging, not as an explanation.
+
+## 1.7 Prompt caching and latency
+
+### Prompt caching
+
+Providers can reuse the prefill computation of a prompt prefix seen recently. Reused tokens are
+much cheaper and faster.
+
+- **Anthropic:** explicit cache breakpoints. Writes cost a premium (about 1.25× base input for
+  the default 5-minute lifetime, more for longer lifetimes), reads about 0.1×. Hits refresh the
+  lifetime.
+- **OpenAI:** automatic above a minimum length; the discount varies by model.
+- **Matching is by exact prefix.** Reuse stops at the first differing token, so one changing
+  token early in the request prevents caching everything after it.
+
+Order requests from most to least stable:
+
+```
+tool definitions → system prompt → long-lived context → conversation history → newest message
+```
+
+Keep timestamps, request IDs and per-user details late, and at the coarsest precision the task
+needs. Keep tool order fixed and serialize JSON deterministically.
+
+### Caching in agent loops
+
+Agent history is append-only, so each call's prompt is the previous call's plus one step: most
+input becomes cache reads. The 1.1 agent with reads at 0.1× and writes at 1.25×:
+
+| | Tokens | Cost |
+| --- | --- | --- |
+| Cache reads | 522,000 | $0.16 |
+| Cache writes | 40,500 | $0.15 |
+| Output | 7,500 | $0.11 |
+| **Total** | | **$0.42** (vs $1.80 uncached) |
+
+- The fixed prefix S becomes nearly free; new per-step content k still matters.
+- Pauses longer than the cache lifetime (human approval) force a full rewrite. Options: a longer
+  lifetime at a higher write price, compacting before pausing, fewer approval points, or
+  accepting the rewrite when pauses are rare.
+
+### Latency
+
+```
+latency ≈ time to first token (queue + prefill) + output tokens ÷ output speed
+```
+
+- Time to first token grows with input; caching reduces it.
+- **Output length usually dominates.** 800 tokens at 80 tokens/s is 10 s of decoding against
+  well under a second of prefill.
+- Agent steps run in sequence, so total time is the sum of calls plus tool time.
+- Levers, roughly by impact: fewer steps, shorter outputs (including thinking), faster models
+  for routine steps, parallel independent calls, caching, and streaming for perceived latency.
+- Measure p50 and p95, not means. Batch APIs trade hours of delay for about 50% off — suited to
+  evals and offline jobs.
