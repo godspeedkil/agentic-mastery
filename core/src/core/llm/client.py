@@ -2,7 +2,7 @@
 
 import random
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -12,15 +12,17 @@ from core.llm.errors import RetryableError
 from core.llm.ledger import Ledger
 from core.llm.pricing import PriceTable
 from core.llm.records import CallRecord, Provider
-from core.llm.types import Request, Response
+from core.llm.types import Request, Response, StreamEvent, TextDelta
 
 
 class ProviderAdapter(Protocol):
-    """What the client needs from a provider: a name and a way to complete a request."""
+    """What the client needs from a provider: a name, and a request completed or streamed."""
 
     name: Provider
 
     def complete(self, request: Request) -> Response: ...
+
+    def stream(self, request: Request) -> Generator[StreamEvent, None, None]: ...
 
 
 class Completion(BaseModel):
@@ -73,17 +75,38 @@ class LLMClient:
         self._sleep = sleep
         self._rng = rng or random.Random()
 
-    def complete(self, provider: str, request: Request) -> Completion:
-        """Send a request, retrying retryable errors; every attempt is recorded."""
+    def complete(
+        self,
+        provider: str,
+        request: Request,
+        *,
+        stream: bool = False,
+        on_text: Callable[[str], None] | None = None,
+    ) -> Completion:
+        """Send a request, retrying retryable errors; every attempt is recorded.
+
+        Streaming (`stream=True`, implied by `on_text`) measures time to first token and
+        passes each piece of text to `on_text` as it arrives. Once any text has been
+        delivered, a failure is not retried, because the caller would see text twice.
+        """
         adapter = self._providers.get(provider)
         if adapter is None:
             raise ValueError(f"unknown provider {provider!r}; have {sorted(self._providers)}")
+        stream = stream or on_text is not None
+
+        delivered = False
+
+        def deliver(text: str) -> None:
+            nonlocal delivered
+            delivered = True
+            if on_text is not None:
+                on_text(text)
 
         for attempt in range(1, self._retry.max_attempts + 1):
             try:
-                return self._attempt(adapter, request, attempt)
+                return self._attempt(adapter, request, attempt, deliver if stream else None)
             except RetryableError as exc:
-                if attempt == self._retry.max_attempts:
+                if delivered or attempt == self._retry.max_attempts:
                     raise
                 wait = self._retry.delay(attempt, exc.retry_after, self._rng)
                 if wait is None:
@@ -91,12 +114,27 @@ class LLMClient:
                 self._sleep(wait)
         raise AssertionError("unreachable: the loop always returns or raises")
 
-    def _attempt(self, adapter: ProviderAdapter, request: Request, attempt: int) -> Completion:
-        """One try: call the provider and record the outcome, success or failure."""
+    def _attempt(
+        self,
+        adapter: ProviderAdapter,
+        request: Request,
+        attempt: int,
+        deliver: Callable[[str], None] | None,
+    ) -> Completion:
+        """One try: call the provider and record the outcome, success or failure.
+
+        `deliver` set means stream, passing text to it; None means a plain call.
+        """
         started_at = datetime.now(UTC)
         start = self._clock()
+        ttft_ms = None
         try:
-            response = adapter.complete(request)
+            if deliver is None:
+                response = adapter.complete(request)
+            else:
+                response, first_token_at = self._consume(adapter.stream(request), deliver)
+                if first_token_at is not None:
+                    ttft_ms = (first_token_at - start) * 1000
         except Exception as exc:
             self._save(
                 CallRecord(
@@ -121,10 +159,25 @@ class LLMClient:
             usage=response.usage,
             cost_usd=self._prices.cost(request.model, response.usage) if self._prices else None,
             latency_ms=latency_ms,
+            ttft_ms=ttft_ms,
             stop_reason=response.stop_reason,
         )
         self._save(record)
         return Completion(response=response, record=record)
+
+    def _consume(
+        self, events: Generator[StreamEvent, None, None], deliver: Callable[[str], None]
+    ) -> tuple[Response, float | None]:
+        """Drain a stream: deliver text, note when the first piece arrived, return the Response."""
+        first_token_at = None
+        for event in events:
+            if isinstance(event, TextDelta):
+                if first_token_at is None:
+                    first_token_at = self._clock()
+                deliver(event.text)
+            else:
+                return event, first_token_at
+        raise RuntimeError("stream ended without a final Response")
 
     def _save(self, record: CallRecord) -> None:
         if self._ledger is not None:
