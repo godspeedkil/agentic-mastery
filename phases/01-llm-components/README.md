@@ -106,7 +106,18 @@ into probabilities, and a decoding strategy picks one token.
 - **Temperature** divides the logits: below 1 sharpens the distribution, above 1 flattens it,
   0 is effectively greedy.
 - **top-p** samples from the smallest set of tokens whose probability sums to p; **top-k**
-  from the k most likely. Some reasoning models fix these parameters or ignore them.
+  from the k most likely.
+
+### Sampling controls in current APIs
+
+- Anthropic has removed `temperature`, `top_p` and `top_k`. Claude 4.7 and later models
+  reject non-default values, and API version 2026-10-21 rejects them on every model; requests
+  sample at the defaults, temperature 1.0
+  ([docs](https://platform.claude.com/docs/en/build-with-claude/working-with-messages)).
+- Reasoning models from other providers often fix or restrict these parameters too. Check
+  each model's documentation.
+- The remaining levers are prompting (style, variety) and effort settings (how much the model
+  reasons, 1.6). The mechanics above still apply to open-weight models you serve yourself.
 
 ### Why temperature 0 is not deterministic
 
@@ -131,8 +142,9 @@ into probabilities, and a decoding strategy picks one token.
   every call.
 - **Use variance deliberately.** Diverse samples enable voting, best-of-n selection, exploration
   after failures, synthetic data generation and RL rollouts.
-- **Temperature:** low for extraction, classification and tool calls; higher for generating
-  diverse candidates. Tune only against an eval.
+- **Steer with prompts and effort where temperature is unavailable.** Where it is available:
+  low for extraction, classification and tool calls; higher for diverse candidates. Tune only
+  against an eval.
 
 ## 1.4 Messages, system prompts and prompting
 
