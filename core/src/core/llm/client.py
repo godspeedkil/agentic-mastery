@@ -102,12 +102,14 @@ class LLMClient:
         *,
         stream: bool = False,
         on_text: Callable[[str], None] | None = None,
+        labels: Mapping[str, str] | None = None,
     ) -> Completion:
         """Send a request, retrying retryable errors; every attempt is recorded.
 
         Streaming (`stream=True`, implied by `on_text`) measures time to first token and
         passes each piece of text to `on_text` as it arrives. Once any text has been
         delivered, a failure is not retried, because the caller would see text twice.
+        `labels` are copied onto every record this call produces.
         """
         adapter = self._providers.get(provider)
         if adapter is None:
@@ -124,7 +126,9 @@ class LLMClient:
 
         for attempt in range(1, self._retry.max_attempts + 1):
             try:
-                return self._attempt(adapter, request, attempt, deliver if stream else None)
+                return self._attempt(
+                    adapter, request, attempt, deliver if stream else None, dict(labels or {})
+                )
             except RetryableError as exc:
                 if delivered or attempt == self._retry.max_attempts:
                     raise
@@ -141,11 +145,13 @@ class LLMClient:
         output_type: type[T],
         *,
         max_repairs: int = 1,
+        labels: Mapping[str, str] | None = None,
     ) -> Parsed[T]:
         """Ask for an answer matching `output_type` and validate it.
 
         If validation fails, the error is sent back for a corrected answer, up to
         `max_repairs` times. A cut-off, refused or empty answer is not repaired.
+        `labels` are copied onto the record of every call, repairs included.
         """
         if max_repairs < 0:
             raise ValueError("max_repairs cannot be negative")
@@ -153,7 +159,7 @@ class LLMClient:
         completions: list[Completion] = []
         last_error: ValidationError | None = None
         for _ in range(max_repairs + 1):
-            completion = self.complete(provider, request)
+            completion = self.complete(provider, request, labels=labels)
             completions.append(completion)
             response = completion.response
             if response.stop_reason in UNPARSEABLE_STOP_REASONS:
@@ -181,6 +187,7 @@ class LLMClient:
         request: Request,
         attempt: int,
         deliver: Callable[[str], None] | None,
+        labels: dict[str, str],
     ) -> Completion:
         """One try: call the provider and record the outcome, success or failure.
 
@@ -201,6 +208,7 @@ class LLMClient:
                 CallRecord(
                     started_at=started_at,
                     run_id=self._run_id,
+                    labels=labels,
                     provider=adapter.name,
                     model=request.model,
                     attempt=attempt,
@@ -214,6 +222,7 @@ class LLMClient:
         record = CallRecord(
             started_at=started_at,
             run_id=self._run_id,
+            labels=labels,
             provider=adapter.name,
             model=request.model,
             attempt=attempt,

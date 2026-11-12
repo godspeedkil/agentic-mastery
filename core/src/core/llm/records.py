@@ -58,6 +58,8 @@ class CallRecord(BaseModel):
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     run_id: str | None = None
     """Groups the calls of one benchmark or agent run."""
+    labels: dict[str, str] = Field(default_factory=dict)
+    """Caller-chosen tags, such as a case ID, for joining records with other results."""
     provider: Provider
     model: str
     """The exact model ID sent to the API."""
