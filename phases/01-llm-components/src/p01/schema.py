@@ -33,7 +33,7 @@ class Invoice(BaseModel):
     """Date payment is due. Compute it from relative terms such as "Net 30" using the
     document date. Null if already paid, due on receipt, or not stated."""
     category: Category
-    """What is being paid for. hardware: computers, peripherals and equipment.
+    """What is being paid for. hardware: computers, peripherals, equipment, tools and parts.
     office_supplies: consumables, printing, and small office items such as mats and desk
     accessories. software: licenses, subscriptions, hosting and APIs. services: work done
     by people. travel: transport and lodging. other: memberships, dues and anything else."""
