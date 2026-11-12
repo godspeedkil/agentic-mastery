@@ -21,18 +21,22 @@ class Invoice(BaseModel):
     vendor: str
     """The business or person issuing the document, exactly as written."""
     invoice_number: str | None
-    """Invoice, receipt, folio or booking reference as written; null if there is none."""
+    """The document's invoice, receipt, order, folio or booking reference: the identifier
+    itself, without labels such as "Invoice", "Order", "Folio" or "#". Null if there is none."""
     total: float
     """Total of all charges including tax and fees, after discounts and credits, before
     subtracting payments or deposits already made."""
     currency: Currency
-    """ISO code of the currency the total is stated in; "other" if none of the listed ones."""
+    """ISO code of the currency the total is stated in. A bare "$" means USD unless the
+    document shows another dollar currency, such as "CA$". "other" for unlisted currencies."""
     due_date: date | None
     """Date payment is due. Compute it from relative terms such as "Net 30" using the
     document date. Null if already paid, due on receipt, or not stated."""
     category: Category
-    """What is being paid for. office_supplies covers consumables and printing; services
-    covers work done by people; other covers memberships, dues and anything else."""
+    """What is being paid for. hardware: computers, peripherals and equipment.
+    office_supplies: consumables, printing, and small office items such as mats and desk
+    accessories. software: licenses, subscriptions, hosting and APIs. services: work done
+    by people. travel: transport and lodging. other: memberships, dues and anything else."""
 
 
 class Case(BaseModel):
