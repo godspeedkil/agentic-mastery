@@ -47,3 +47,4 @@ test = { cmd = "pytest", help = "Run the test suite" }
 check = { sequence = ["lint", "format-check", "test"], help = "Everything CI runs" }
 fix = { sequence = [{ cmd = "ruff check --fix ." }, { cmd = "ruff format ." }], help = "Auto-fix lint issues and format" }
 bench = { cmd = "python -m p01.run", help = "Run the Phase 1 benchmark (costs money; see --help)" }
+report = { cmd = "jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=python3 phases/01-llm-components/results/analysis.ipynb", help = "Re-run the Phase 1 report notebook from a clean kernel" }
