@@ -1,7 +1,7 @@
 """Turn a benchmark run's files into tables for the report.
 
 A run is 30 cases x 3 repeats per model, and repeats of one case are strongly correlated,
-so uncertainty is estimated by resampling cases, never individual predictions.
+so intervals use the number of cases as the sample size, never the number of predictions.
 """
 
 import json
@@ -76,16 +76,16 @@ def per_prediction(run_dir: Path) -> pd.DataFrame:
     return load_predictions(run_dir).merge(totals, on=keys, how="left", validate="one_to_one")
 
 
-def bootstrap_ci(
-    per_case: pd.Series, n_boot: int = 10_000, level: float = 0.95, seed: int = 0
-) -> tuple[float, float]:
-    """Percentile interval for the mean of per-case values, resampling cases with replacement."""
-    values = per_case.to_numpy(dtype=float)
-    rng = np.random.default_rng(seed)
-    means = rng.choice(values, size=(n_boot, len(values)), replace=True).mean(axis=1)
-    tail = (1 - level) / 2 * 100
-    low, high = np.percentile(means, [tail, 100 - tail])
-    return float(low), float(high)
+def wilson_interval(rate: float, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a proportion observed over n independent units.
+
+    Unlike resampling, it stays honest at 0% and 100%: no failures in 30 cases still
+    leaves room for a failure rate of several percent.
+    """
+    denominator = 1 + z**2 / n
+    center = (rate + z**2 / (2 * n)) / denominator
+    half = z * np.sqrt(rate * (1 - rate) / n + z**2 / (4 * n**2)) / denominator
+    return float(max(0.0, center - half)), float(min(1.0, center + half))
 
 
 def summarize(df: pd.DataFrame) -> pd.DataFrame:
@@ -93,7 +93,7 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for model, group in df.groupby("model"):
         per_case = group.groupby("case_id")["exact"]
-        low, high = bootstrap_ci(per_case.mean())
+        low, high = wilson_interval(group["exact"].mean(), n=per_case.ngroups)
         rows.append(
             {
                 "model": model,

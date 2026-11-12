@@ -1,14 +1,13 @@
-import pandas as pd
 import pytest
 
 from core.llm import CallRecord, Usage
 from p01.analysis import (
-    bootstrap_ci,
     failures,
     field_error_rates,
     per_prediction,
     summarize,
     tag_error_rates,
+    wilson_interval,
 )
 from p01.run import Prediction
 from p01.schema import load_cases
@@ -95,16 +94,22 @@ def test_interval_contains_the_estimate(frame):
     assert row.ci_low <= row.exact_rate <= row.ci_high
 
 
-def test_bootstrap_of_constant_values_is_a_point():
-    assert bootstrap_ci(pd.Series([1.0] * 30)) == (1.0, 1.0)
+def test_perfect_score_still_has_a_lower_bound():
+    low, high = wilson_interval(1.0, n=30)
+    assert high == 1.0
+    assert 0.85 < low < 0.92  # zero failures in 30 cases does not prove 100%
 
 
-def test_bootstrap_is_reproducible_and_widens_with_fewer_cases():
-    values = pd.Series([1.0, 0.0] * 15)
-    assert bootstrap_ci(values) == bootstrap_ci(values)
-    narrow = bootstrap_ci(pd.Series([1.0, 0.0] * 150))
-    wide = bootstrap_ci(values)
-    assert (wide[1] - wide[0]) > (narrow[1] - narrow[0])
+def test_interval_narrows_with_more_cases():
+    small = wilson_interval(0.9, n=30)
+    large = wilson_interval(0.9, n=300)
+    assert (large[1] - large[0]) < (small[1] - small[0])
+    assert small[0] < 0.9 < small[1]
+
+
+def test_interval_uses_cases_not_predictions(frame):
+    row = summarize(frame).loc[FLAKY]
+    assert (row.ci_low, row.ci_high) == wilson_interval(row.exact_rate, n=len(CASES))
 
 
 def test_field_error_rates_point_at_the_wrong_field(frame):
