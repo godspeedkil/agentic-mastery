@@ -1,0 +1,866 @@
+# Phase 1 — LLMs as engineering components
+
+To the rest of a system, an LLM is an API that is unreliable, metered and stochastic.
+This phase covers the properties that shape every agent built on top of one, then wraps the
+API in a client the rest of the repo can rely on.
+
+## 1.1 Tokens and cost
+
+### Tokens
+
+- Models read **tokens**: subword chunks from a fixed vocabulary of roughly 100k–200k entries,
+  built with algorithms such as byte-pair encoding (BPE). Common words are one token; rare words
+  split into several.
+- English prose averages about 4 characters (0.75 words) per token. Code, JSON and non-English
+  text use more tokens per character.
+- Each provider has its own tokenizer, so the same text yields different counts. Use the
+  provider's own token counter whenever the number matters.
+
+### Billing
+
+- Prices are per million tokens, with separate rates for **input** (everything sent: system
+  prompt, tool definitions, history, documents) and **output** (everything generated, including
+  hidden reasoning tokens).
+- Output costs several times more per token than input. Input is processed in one parallel pass
+  (*prefill*); output is generated one token at a time, each needing its own pass (*decode*).
+
+### Why agent loops get expensive
+
+The API is stateless: every call re-sends the full conversation. In an agent loop, each step
+appends a tool call and its result, and the next call sends all of it again.
+
+With **S** = fixed prefix per call (system prompt + tool definitions), **k** = tokens appended
+per step, and **n** = steps:
+
+```
+total input tokens ≈ n·S + k·n(n+1)/2
+```
+
+The history term grows with n².
+
+**Example.** S = 3,000, k = 1,500, 300 output tokens per step. Illustrative prices: $3 per
+million input tokens, $15 per million output.
+
+| Scenario | Input tokens | Output tokens | Cost |
+| --- | --- | --- | --- |
+| 25 steps (baseline) | 562,500 | 7,500 | $1.80 |
+| 50 steps | 2,062,500 | 15,000 | $6.41 |
+| 25 steps, S halved | 525,000 | 7,500 | $1.69 |
+| 25 steps, k halved | 318,750 | 7,500 | $1.07 |
+
+What the numbers show:
+
+- **Input dominates.** Output is 5× pricier per token, yet input is 94% of the baseline bill.
+- **Step count is the main cost driver.** Doubling steps multiplies cost by 3.6× here: linear
+  terms double, the history term quadruples. Longer runs approach 4×.
+- **Shrink what accumulates before what is fixed.** Halving k saves 6.5× more than halving S,
+  because k multiplies n² and S only n. Compact tool results and history compaction are the
+  biggest levers. Prompt caching (1.7) changes the calculation for repeated tokens.
+- **Compare models on cost per completed task, not price per token.** A model that finishes in
+  fewer steps or writes shorter outputs can cost less even at a higher rate.
+
+### In the code
+
+The client turns each provider's usage report into one shape (`core/src/core/llm/records.py`):
+
+```python
+class Usage(BaseModel):
+    input_tokens: NonNegativeInt = 0  # base input rate
+    cache_read_tokens: NonNegativeInt = 0  # cache-read rate
+    cache_write_tokens: NonNegativeInt = 0  # cache-write rate
+    output_tokens: NonNegativeInt = 0  # output rate, reasoning included
+    reasoning_tokens: NonNegativeInt = 0  # the reasoning share of output_tokens
+```
+
+The three input counts never overlap, so each input token gets exactly one rate. Reasoning is
+billed as output, so it sits inside `output_tokens` instead of being added on top.
+
+Providers report this differently. OpenAI counts cached tokens inside its `input_tokens`, so
+its adapter takes them out. Here `usage` is OpenAI's usage object and `details` its
+breakdown of input tokens (`core/src/core/llm/openai_provider.py`):
+
+```python
+uncached = usage.input_tokens - details.cached_tokens - details.cache_write_tokens
+```
+
+Pricing is the per-million arithmetic from Billing. `ModelPrice` holds one model's rates in
+USD per million tokens (`self.input`, `self.output`, `self.cache_read`, `self.cache_write`),
+and its `cost` method prices one call's `Usage` (`core/src/core/llm/pricing.py`):
+
+```python
+TOKENS_PER_UNIT = 1_000_000
+
+total = usage.input_tokens * self.input + usage.output_tokens * self.output
+for tokens, rate in [
+    (usage.cache_read_tokens, self.cache_read),
+    (usage.cache_write_tokens, self.cache_write),
+]:
+    if tokens == 0:
+        continue
+    if rate is None:
+        return None
+    total += tokens * rate
+return total / TOKENS_PER_UNIT
+```
+
+A missing rate returns `None`, not 0, so an unknown cost never passes for a cheap one.
+
+Models are compared per completed task. The analysis builds one row per finished extraction,
+summing the cost of every call behind it, repair turns included; `group` holds one model's
+rows (`phases/01-llm-components/src/p01/analysis.py`):
+
+```python
+"cost_per_1k_usd": group["cost_usd"].mean() * 1000,
+```
+
+That makes this cost per task, not price per token.
+
+## 1.2 Context windows and degradation
+
+### The window
+
+- The **context window** is the maximum tokens per request, shared by input and output.
+  A separate, much smaller limit caps output tokens.
+- Exceeding it fails the request or, in some frameworks, silently drops content. Agent history
+  grows every step (1.1), so long-running agents reach the limit unless something manages it.
+
+### Effective length is shorter than advertised
+
+- **Lost in the middle** ([Liu et al., 2023](https://arxiv.org/abs/2307.03172)): recall is best
+  for information at the start and end of the context, worst in the middle.
+- **Needle-in-a-haystack overstates ability.** It tests finding one distinctive phrase by
+  keyword. Benchmarks with multi-hop questions, aggregation and no keyword overlap
+  ([RULER](https://arxiv.org/abs/2404.06654), [NoLiMa](https://arxiv.org/abs/2502.05167))
+  show effective length well below the advertised window.
+- **Context rot** ([Chroma, 2025](https://research.trychroma.com/context-rot)): quality drops
+  as input grows, even on simple tasks, and faster when the context contains distractors —
+  content similar to the answer but wrong.
+- Intuition: attention is a fixed budget spread across all tokens, similar content competes for
+  it, and models see far fewer very long examples in training.
+
+### Rules of thumb
+
+- **Fewer, higher-signal tokens beat more tokens.** Extra context costs money, adds latency
+  (prefill time grows with input) and lowers quality.
+- **Placement matters.** Put long documents first and the question last. Wrap each document in
+  tags with an ID (`<doc id="7">…</doc>`) so the model can separate and cite them.
+- **Distractors hurt more than noise.** Ten near-duplicates do more damage than ten unrelated
+  documents; retrieve less, but more precisely.
+- **The agent's own history dilutes its instructions.** Long histories weaken constraints given
+  at the start. Mitigate by re-injecting key instructions near the end and compacting history.
+- **Enforce hard constraints in code, not in the prompt.** If an action must never happen, the
+  tool should refuse it. The prompt explains the rule; the code guarantees it.
+
+### In the code
+
+Output has its own cap, set on every request. `Request` is the client's description of one
+call (`core/src/core/llm/types.py`):
+
+```python
+max_tokens: PositiveInt = 1024
+```
+
+The benchmark raises it, because reasoning spends the same budget
+(`phases/01-llm-components/src/p01/run.py`):
+
+```python
+MAX_TOKENS = 8192
+"""Generous, because current models think before answering and thinking counts as output."""
+```
+
+Hitting a limit is never silent. Each adapter maps its provider's reasons for stopping to one
+normalized stop reason. Anthropic reports a full context window separately, and it lands in
+the same bucket as a full output budget (`core/src/core/llm/anthropic_provider.py`):
+
+```python
+STOP_REASONS: dict[str, StopReason] = {
+    "max_tokens": "max_tokens",
+    "model_context_window_exceeded": "max_tokens",
+    ...
+}
+```
+
+The client refuses to parse an answer that stopped for one of these reasons and raises its
+own error instead. `response` is the normalized reply to the call (`core/src/core/llm/client.py`):
+
+```python
+UNPARSEABLE_STOP_REASONS = {"max_tokens", "refusal"}
+
+if response.stop_reason in UNPARSEABLE_STOP_REASONS:
+    raise StructuredOutputError(...)
+```
+
+The document goes in tags, with the instructions kept apart in the system prompt.
+`SYSTEM_PROMPT` is a string constant holding those instructions, `case.text` is the invoice
+being extracted, and `Message.user` builds a user turn (`phases/01-llm-components/src/p01/run.py`):
+
+```python
+document = f"<document>\n{case.text}\n</document>"
+return Request(
+    model=model.id, system=SYSTEM_PROMPT, messages=[Message.user(document)], max_tokens=MAX_TOKENS
+)
+```
+
+Hard constraints are enforced in code: the prompt asks for a schema, and the client accepts
+only what validates against it. `output_type` is the Pydantic class the answer must match
+(1.5); `model_validate_json` raises if the text doesn't fit it (`core/src/core/llm/client.py`):
+
+```python
+value = output_type.model_validate_json(response.text)
+```
+
+Every request here is one short document, so nothing in this phase gets near the window.
+Degradation with length shows up once agents accumulate history.
+
+## 1.3 Sampling and non-determinism
+
+### Decoding
+
+At each step the model produces a score (logit) for every vocabulary token; softmax turns these
+into probabilities, and a decoding strategy picks one token.
+
+- **Greedy** takes the most likely token. **Sampling** draws from the distribution.
+- **Temperature** divides the logits: below 1 sharpens the distribution, above 1 flattens it,
+  0 is effectively greedy.
+- **top-p** samples from the smallest set of tokens whose probability sums to p; **top-k**
+  from the k most likely.
+
+### Sampling controls in current APIs
+
+- Anthropic has removed `temperature`, `top_p` and `top_k`. Claude 4.7 and later models
+  reject non-default values, and API version 2026-10-21 rejects them on every model; requests
+  sample at the defaults, temperature 1.0
+  ([docs](https://platform.claude.com/docs/en/build-with-claude/working-with-messages)).
+- Reasoning models from other providers often fix or restrict these parameters too. Check
+  each model's documentation.
+- The remaining levers are prompting (style, variety) and effort settings (how much the model
+  reasons, 1.6). The mechanics above still apply to open-weight models you serve yourself.
+
+### Why temperature 0 is not deterministic
+
+- **Floating-point addition is not associative**, and GPU kernels change summation order with
+  batch composition, so a request's numerics depend on concurrent traffic
+  ([Thinking Machines, 2025](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/)).
+  Mixture-of-experts routing can depend on the batch too.
+- **Small differences compound.** A flip between near-tied tokens changes everything after it.
+- **Models change behind aliases.** Pin dated snapshot IDs. A `seed` parameter, where offered,
+  is best-effort.
+
+### Engineering consequences
+
+- **Assert properties, not exact strings:** parses, matches the schema, required fields
+  present, values in allowed sets.
+- **Separate testing code from evaluating the model.** Unit tests replay recorded responses:
+  fast, free, deterministic, and they cover parsing, errors and retries. Evals run many inputs,
+  several times each, and report rates with uncertainty.
+- **Input variation dominates.** Even a deterministic model needs many eval cases; one run on
+  one input says nothing about the rest.
+- **Reproduce through logging.** Record model snapshot, parameters, full prompt and response for
+  every call.
+- **Use variance deliberately.** Diverse samples enable voting, best-of-n selection, exploration
+  after failures, synthetic data generation and RL rollouts.
+- **Steer with prompts and effort where temperature is unavailable.** Where it is available:
+  low for extraction, classification and tool calls; higher for diverse candidates. Tune only
+  against an eval.
+
+### In the code
+
+`Request`, the client's description of one call, has no sampling parameters, and it rejects
+unknown fields, so passing one fails before anything is sent (`core/src/core/llm/types.py`):
+
+```python
+class Request(BaseModel):
+    """What to send. Sampling parameters are deliberately absent: current models reject them."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", use_attribute_docstrings=True)
+```
+
+`Request(model="m", messages=[...], temperature=0)` raises a `ValidationError`.
+
+Models change behind aliases, so `Response`, the normalized reply, keeps the ID the provider
+actually served:
+
+```python
+model: str
+"""Model ID reported by the provider, which may differ from the requested alias."""
+```
+
+Unit tests replay recorded provider responses instead of calling the API. `FIXTURES` is the
+folder of saved JSON replies, and `AnthropicMessage` is the SDK's reply type
+(`core/tests/test_llm_anthropic_provider.py`):
+
+```python
+def load_message(name: str, **overrides) -> AnthropicMessage:
+    data = json.loads((FIXTURES / name).read_text())
+    return AnthropicMessage.model_validate(data | overrides)
+```
+
+The benchmark is the eval: every model runs every case several times. `models`, `cases` and
+`repeats` are the run's settings (`phases/01-llm-components/src/p01/run.py`):
+
+```python
+jobs = [(model, case, r) for model in models for case in cases for r in range(1, repeats + 1)]
+```
+
+Scoring asserts properties, not exact strings. It compares each `predicted` field with the
+labeled `expected` one: names on letters and digits only (`normalize_name` drops case,
+punctuation and spacing), totals within half a cent (`CENT = 0.005`)
+(`phases/01-llm-components/src/p01/scoring.py`):
+
+```python
+"vendor": normalize_name(predicted.vendor) == normalize_name(expected.vendor),
+"total": abs(predicted.total - expected.total) < CENT,
+```
+
+Rates come with uncertainty, counted over cases rather than calls, because repeats of one case
+are correlated and input variation dominates. `group` holds one model's predictions, each
+marked `exact` when all fields are right; `per_case` groups them by case; `wilson_interval`
+gives a 95% interval for a rate observed over `n` independent units
+(`phases/01-llm-components/src/p01/analysis.py`):
+
+```python
+per_case = group.groupby("case_id")["exact"]
+low, high = wilson_interval(group["exact"].mean(), n=per_case.ngroups)
+...
+"all_repeats_correct": per_case.all().mean(),  # reliable every time (pass^k)
+"any_repeat_correct": per_case.any().mean(),  # right at least once (pass@k)
+```
+
+## 1.4 Messages, system prompts and prompting
+
+### Anatomy of a request
+
+- **Model** (a dated snapshot), **system prompt** (standing instructions), **messages**
+  (alternating `user`/`assistant` turns made of content blocks: text, images, tool calls, tool
+  results), **tools** (Phase 2) and **parameters** (`max_tokens`, stop sequences; sampling
+  parameters where the model still accepts them, 1.3).
+- The response carries content blocks, a **stop reason** and **usage** (token counts).
+- Providers differ in shape: where the system prompt goes, how tool calls and results are
+  structured. A shared client normalizes this.
+- The provider renders everything into one token sequence using the model's **chat template**.
+  Roles carry trained authority — system above user above tool results — an **instruction
+  hierarchy** that matters for security (Phase 8).
+- The API is stateless: the application stores the conversation and decides what each call
+  includes.
+
+### The system prompt as policy
+
+Cover role and context, the task and what success looks like, constraints with their reasons,
+output format, and when to use tools. Aim between brittle if/else rules and vague slogans:
+clear principles plus the reasoning behind them.
+
+### Prompting principles
+
+- **Be clear and direct.** Brief the model like a capable colleague new to the project.
+- **Give the reason for each rule.** The model applies reasons to cases the rule never names,
+  and they supply an honest alternative to the forbidden action.
+- **State what to do, not only what to avoid.** Naming the unwanted behavior can prime it.
+- **Use varied examples.** Models copy every shared feature of their examples — length, tone,
+  format, label balance — not just the intended pattern. Include hard cases; shuffle order.
+- **Structure long prompts** with XML tags or headings to keep instructions, data and examples
+  separate.
+- **Use structured outputs** (1.5) for anything code will parse.
+- **Treat prompts as code.** Version them, change one thing at a time, judge changes with evals.
+
+Example. Weak: "Don't be verbose. Don't use bullet points. Don't mention competitors."
+Stronger:
+
+> You answer customers of Acme Billing in a chat widget shown on phone screens. Reply in two to
+> four short sentences of plain prose; long or list-formatted replies are hard to read in the
+> widget. Help only with Acme's products. If a customer asks about another vendor, say you can
+> only speak to Acme and point them to the Acme feature that meets their need, because
+> comparisons we can't verify may be inaccurate.
+
+### In the code
+
+Messages carry only `user` and `assistant` turns, each a list of content blocks (only text so
+far; tool calls join in Phase 2). The system prompt is a separate field on `Request`
+(`core/src/core/llm/types.py`):
+
+```python
+Role = Literal["user", "assistant"]
+
+
+class Message(BaseModel):
+    role: Role
+    content: list[ContentBlock] = Field(min_length=1)
+```
+
+Each adapter puts the system prompt where its provider expects it:
+
+```python
+params["system"] = request.system  # anthropic_provider.py
+params["instructions"] = request.system  # openai_provider.py
+```
+
+The API is stateless, so the application owns the conversation. When an answer fails
+validation, the client sends the whole exchange again with two turns appended: the invalid
+answer, then Pydantic's `ValidationError` as feedback (`core/src/core/llm/client.py`):
+
+```python
+def repair_turns(answer: str, error: ValidationError) -> list[Message]:
+    feedback = f"Your answer did not validate:\n{error}\nReply with the corrected JSON only."
+    return [Message.assistant(answer), Message.user(feedback)]
+```
+
+The system prompt states role and context, the task, and what to do when information is
+missing (`phases/01-llm-components/src/p01/run.py`):
+
+```python
+SYSTEM_PROMPT = (
+    "You extract structured data from invoices, receipts and billing messages for an "
+    "accounts-payable system. Follow each field's description in the schema exactly. "
+    "When a document mentions several amounts or references, choose the one the field "
+    "describes. Never guess: use null where the schema allows it and the document does "
+    "not say."
+)
+```
+
+Most of the instructions live in the schema: the Pydantic model the answer must match. Each
+field's docstring becomes its description, which the model reads. They say what to do,
+including the hard cases; `Currency` is the fixed list of allowed codes
+(`phases/01-llm-components/src/p01/schema.py`):
+
+```python
+currency: Currency
+"""ISO code of the currency the total is stated in. A bare "$" means USD unless the
+document shows another dollar currency, such as "CA$". "other" for unlisted currencies."""
+```
+
+## 1.5 Structured outputs
+
+Code that acts on model output needs that output in a known shape.
+
+### Levels of guarantee
+
+| Approach | Guarantees | Does not guarantee |
+| --- | --- | --- |
+| Prompt only ("return JSON") | Nothing | Parsing, shape |
+| JSON mode | Valid JSON | Shape: fields may be missing or extra |
+| Schema-constrained decoding | Valid JSON matching the schema | Correct values |
+| Forced tool call | Arguments matching the tool schema | Correct values |
+
+Prefer schema-constrained decoding where the provider supports it.
+
+### How constrained decoding works
+
+The JSON Schema is compiled into a grammar; at each step the provider masks every token that
+would violate it. Limits:
+
+- Only a subset of JSON Schema is supported; unsupported keywords may be rejected or
+  silently ignored.
+- A new schema adds compilation latency on first use; providers cache it.
+- It guarantees shape, not truth.
+- Truncation (`max_tokens`) or a refusal still yields incomplete output. Check the stop
+  reason before parsing.
+
+### One schema definition
+
+Define the shape once as a Pydantic model: generate the JSON Schema for the request, validate
+the response into the same model. Validate what the schema cannot express (cross-field rules,
+values that must exist elsewhere) in code, and on failure run a bounded repair loop: send the
+validation error back and retry once or twice.
+
+### Schema design
+
+- **Descriptions are prompt text.** Write them as instructions.
+- **Use enums for categories**, lowercase, each value described. Include a value for cases
+  that don't fit cleanly (e.g. `mixed`) instead of forcing a choice.
+- **Represent "not present" as `null`, not a sentinel string.** `due_date: date | None` keeps
+  the type honest; a string like `"unknown"` breaks parsing and leaks into stored data.
+  Required fields without an escape hatch invite fabrication.
+- **Order fields deliberately.** Generation follows schema order; put evidence or reasoning
+  before the answer it should inform.
+- **Keep schemas small and flat.**
+- **Rigid formats can reduce reasoning quality**
+  ([Tam et al., 2024](https://arxiv.org/abs/2408.02442)). For hard tasks, reason first, then
+  emit the structure.
+
+### In the code
+
+The benchmark defines the answer's shape once, as a Pydantic model
+(`phases/01-llm-components/src/p01/schema.py`):
+
+```python
+Currency = Literal["USD", "EUR", "GBP", "JPY", "CAD", "other"]
+Category = Literal["software", "hardware", "services", "travel", "office_supplies", "other"]
+
+
+class Invoice(BaseModel):
+    vendor: str
+    invoice_number: str | None
+    total: float
+    currency: Currency
+    due_date: date | None
+    category: Category
+```
+
+Categories are closed sets, each ending in `"other"` so nothing is forced into a wrong value.
+"Not present" is `None` (JSON `null`) in the field's type, not a sentinel string.
+
+A request says which shape it wants through its `output_type` field. The field holds a class,
+not an instance: the type the answer must match (`core/src/core/llm/types.py`):
+
+```python
+class Request(BaseModel):
+    ...
+    output_type: type[BaseModel] | None = None
+    """When set, the provider constrains the answer to this model's JSON Schema."""
+```
+
+The benchmark hands `Invoice` to the client's `parse` method
+(`phases/01-llm-components/src/p01/run.py`):
+
+```python
+parsed = client.parse(model.provider, build_request(case, model), Invoice, labels=labels)
+```
+
+`parse` receives it as its `output_type` argument, sets it on the request, and after the call
+validates the answer into the same class (`core/src/core/llm/client.py`):
+
+```python
+def parse(self, provider, request, output_type, *, max_repairs=1, labels=None):
+    request = request.model_copy(update={"output_type": output_type})
+    for _ in range(max_repairs + 1):
+        completion = self.complete(provider, request, labels=labels)
+        ...
+        value = output_type.model_validate_json(completion.response.text)
+```
+
+Each provider adapter reads `request.output_type` and turns the class into the JSON Schema its
+provider's constrained decoding accepts:
+
+```python
+# anthropic_provider.py
+schema = anthropic.transform_schema(request.output_type)
+params["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+
+# openai_provider.py
+params["text"] = {
+    "format": {
+        "type": "json_schema",
+        "name": request.output_type.__name__,
+        "schema": to_strict_json_schema(request.output_type),
+        "strict": True,
+    }
+}
+```
+
+So `Invoice` both constrains what the model can generate and validates what comes back. If
+validation still fails, the error is sent back as a repair turn (1.4), at most `max_repairs`
+times.
+
+## 1.6 Reasoning models
+
+### What changes
+
+Reasoning models generate a chain of thought before answering, trained with reinforcement
+learning on verifiable tasks. They trade test-time compute for quality.
+
+- **Thinking tokens are billed as output** and add latency; they can far exceed the visible answer.
+- **Effort is controllable** through a token budget or effort level, depending on the provider;
+  some models adapt it automatically.
+- **Visibility varies:** full reasoning, a summary, or nothing.
+- **Tool loops carry reasoning across turns.** Models can think between tool calls, and
+  providers may require earlier reasoning to be passed back unchanged. Follow each provider's
+  rules and log usage to see what is billed.
+
+### Cost impact
+
+The 1.1 agent (25 steps) with 2,000 thinking tokens per step:
+
+| Scenario | Input | Output | Total |
+| --- | --- | --- | --- |
+| No thinking | $1.69 | $0.11 | $1.80 |
+| Thinking, not re-sent | $1.69 | $0.86 | $2.55 |
+| Thinking re-sent as history | $3.64 | $0.86 | $4.50 |
+
+Output grows from 6% to a third of the bill, and reasoning that accumulates in history joins
+the n² term.
+
+### When to use one
+
+| Worth it | Usually not |
+| --- | --- |
+| Multi-step logic, math, code | Extraction, classification, formatting |
+| Planning, task decomposition | Latency-critical steps |
+| Ambiguous tool choice | High-volume repetitive steps |
+| Complex or conflicting instructions | Tasks a small model already handles |
+
+- **Route per step.** Reasoning model for judgment, smaller models for routine steps, plain
+  code for anything deterministic such as lookups.
+- **Make judgments checkable.** Ask for structured decisions that cite their sources.
+- **Set effort with an eval**, not intuition.
+
+### Prompting
+
+- Give the goal, constraints and success criteria; don't script the steps. Detailed procedures
+  lock the model into one method and spend its thinking on compliance. Keep mandatory steps only
+  where required, stated with their reason.
+- "Think step by step" is redundant. Fewer examples are needed.
+- **Visible reasoning is not guaranteed to be faithful** to what drove the answer
+  ([Anthropic, 2025](https://www.anthropic.com/research/reasoning-models-dont-say-think)).
+  Use it for debugging, not as an explanation.
+
+### In the code
+
+Thinking is billed as output, so `Usage` (1.1) counts it inside `output_tokens` and reports
+the share separately. A validator rejects a usage report that claims more reasoning than
+output (`core/src/core/llm/records.py`):
+
+```python
+@model_validator(mode="after")
+def _reasoning_within_output(self) -> Self:
+    if self.reasoning_tokens > self.output_tokens:
+        raise ValueError("reasoning_tokens cannot exceed output_tokens")
+    return self
+```
+
+Each adapter reads the share from its provider's usage report:
+
+```python
+reasoning_tokens = (details.thinking_tokens if details else 0,)  # anthropic_provider.py
+reasoning_tokens = (usage.output_tokens_details.reasoning_tokens,)  # openai_provider.py
+```
+
+Reasoning content arrives alongside the answer: Anthropic sends `thinking` blocks
+(`redacted_thinking` when the content is withheld), OpenAI sends `reasoning` items. The
+adapters drop them when building the normalized `Response`, keeping only the answer text
+(`core/src/core/llm/anthropic_provider.py`, then `openai_provider.py`):
+
+```python
+SKIPPED_BLOCK_TYPES = {"thinking", "redacted_thinking"}
+"""Reasoning blocks: billed through usage, not part of the answer text."""
+
+for block in message.content:
+    if block.type == "text":
+        content.append(TextBlock(text=block.text))
+    elif block.type not in SKIPPED_BLOCK_TYPES:
+        raise ValueError(f"unsupported Anthropic content block: {block.type!r}")
+```
+
+```python
+for item in response.output:
+    if item.type == "reasoning":
+        continue
+```
+
+Dropping reasoning is safe here because each call stands alone. In tool loops, earlier
+reasoning must be kept and passed back as the provider requires.
+
+`Request` has no effort setting, so every model reasons at its provider's default. The
+benchmark records how much each one spends: `group` holds one model's predictions
+(`phases/01-llm-components/src/p01/analysis.py`):
+
+```python
+"reasoning_tokens": group["reasoning_tokens"].mean(),
+```
+
+## 1.7 Prompt caching and latency
+
+### Prompt caching
+
+Providers can reuse the prefill computation of a prompt prefix seen recently. Reused tokens are
+much cheaper and faster.
+
+- **Anthropic:** explicit cache breakpoints. Writes cost a premium (about 1.25× base input for
+  the default 5-minute lifetime, more for longer lifetimes), reads about 0.1×. Hits refresh the
+  lifetime.
+- **OpenAI:** automatic above a minimum length; the discount varies by model.
+- **Matching is by exact prefix.** Reuse stops at the first differing token, so one changing
+  token early in the request prevents caching everything after it.
+
+Order requests from most to least stable:
+
+```
+tool definitions → system prompt → long-lived context → conversation history → newest message
+```
+
+Keep timestamps, request IDs and per-user details late, and at the coarsest precision the task
+needs. Keep tool order fixed and serialize JSON deterministically.
+
+### Caching in agent loops
+
+Agent history is append-only, so each call's prompt is the previous call's plus one step: most
+input becomes cache reads. The 1.1 agent with reads at 0.1× and writes at 1.25×:
+
+| | Tokens | Cost |
+| --- | --- | --- |
+| Cache reads | 522,000 | $0.16 |
+| Cache writes | 40,500 | $0.15 |
+| Output | 7,500 | $0.11 |
+| **Total** | | **$0.42** (vs $1.80 uncached) |
+
+- The fixed prefix S becomes nearly free; new per-step content k still matters.
+- Pauses longer than the cache lifetime (human approval) force a full rewrite. Options: a longer
+  lifetime at a higher write price, compacting before pausing, fewer approval points, or
+  accepting the rewrite when pauses are rare.
+
+### Latency
+
+```
+latency ≈ time to first token (queue + prefill) + output tokens ÷ output speed
+```
+
+- Time to first token grows with input; caching reduces it.
+- **Output length usually dominates.** 800 tokens at 80 tokens/s is 10 s of decoding against
+  well under a second of prefill.
+- Agent steps run in sequence, so total time is the sum of calls plus tool time.
+- Levers, roughly by impact: fewer steps, shorter outputs (including thinking), faster models
+  for routine steps, parallel independent calls, caching, and streaming for perceived latency.
+- Measure p50 and p95, not means. Batch APIs trade hours of delay for about 50% off — suited to
+  evals and offline jobs.
+
+### In the code
+
+Every benchmark request has the same stable prefix and differs only at the end: the fixed
+`SYSTEM_PROMPT` and schema come first, the invoice last (`phases/01-llm-components/src/p01/run.py`,
+from 1.2):
+
+```python
+document = f"<document>\n{case.text}\n</document>"
+return Request(
+    model=model.id, system=SYSTEM_PROMPT, messages=[Message.user(document)], max_tokens=MAX_TOKENS
+)
+```
+
+The client sets no cache breakpoints, so Anthropic calls are not cached, and OpenAI caches
+automatically only past its minimum prompt length. When caching does happen, each adapter
+reports it in the `Usage` fields from 1.1 (`core/src/core/llm/anthropic_provider.py`):
+
+```python
+cache_read_tokens = (usage.cache_read_input_tokens or 0,)
+cache_write_tokens = (usage.cache_creation_input_tokens or 0,)
+```
+
+Every attempt is timed. `self._clock` is `time.perf_counter` by default, a monotonic timer;
+tests pass a fake clock to control time (`core/src/core/llm/client.py`, `LLMClient._attempt`):
+
+```python
+start = self._clock()
+if deliver is None:
+    response = adapter.complete(request)
+else:
+    response, first_token_at = self._consume(adapter.stream(request), deliver)
+    if first_token_at is not None:
+        ttft_ms = (first_token_at - start) * 1000
+latency_ms = (self._clock() - start) * 1000
+```
+
+`deliver` is set only when the caller streams. Time to first token can only be measured then:
+`_consume` reads the stream's events and notes when the first piece of text arrives:
+
+```python
+for event in events:
+    if isinstance(event, TextDelta):
+        if first_token_at is None:
+            first_token_at = self._clock()
+        deliver(event.text)
+```
+
+The benchmark's calls are independent, so it runs them in parallel; `workers` defaults to 8
+(`phases/01-llm-components/src/p01/run.py`, `run_benchmark`):
+
+```python
+with ThreadPoolExecutor(max_workers=workers) as pool:
+```
+
+And it reports latency as percentiles, not means; `group` holds one model's predictions
+(`phases/01-llm-components/src/p01/analysis.py`):
+
+```python
+"latency_p50_s": group["latency_ms"].quantile(0.50) / 1000,
+"latency_p95_s": group["latency_ms"].quantile(0.95) / 1000,
+```
+
+## Lab: an invoice-extraction benchmark
+
+The lab puts the client to work on a small, realistic task: extract six fields from invoices,
+receipts and billing messages, on six models from two providers, and measure accuracy, cost
+and latency.
+
+### How one prediction flows
+
+```mermaid
+flowchart TD
+    A["run_benchmark<br/>one job per model × case × repeat"] --> B["build_request<br/>SYSTEM_PROMPT + document"]
+    B --> C["LLMClient.parse<br/>sets output_type = Invoice"]
+    C --> D["LLMClient.complete<br/>retries retryable errors"]
+    D --> E["provider adapter<br/>Request → SDK params + JSON Schema"]
+    E --> F[("Anthropic / OpenAI API")]
+    F --> G["provider adapter<br/>reply → Response: text, stop reason, Usage"]
+    G --> H["CallRecord<br/>usage, cost, latency"]
+    H --> I[("calls.jsonl")]
+    G --> J{"validates as Invoice?"}
+    J -- "no" --> K["repair turns"] --> D
+    J -- "yes" --> L["score<br/>field by field vs. expected"]
+    L --> M[("predictions.jsonl")]
+    I --> N["analysis.ipynb → figures"]
+    M --> N
+```
+
+### Running it
+
+```bash
+uv run poe bench --limit 2 --repeats 1 --models claude-haiku-5-5  # cheap smoke test
+uv run poe bench   # all models, all cases, 3 repeats
+uv run poe report  # re-run the notebook and redraw the figures
+```
+
+`poe bench` calls paid APIs. Each run writes a folder under `results/runs/`: `run.json` (models,
+prompt, git commit), `calls.jsonl` (one `CallRecord` per attempt) and `predictions.jsonl` (one
+scored prediction per job). `poe report` executes `results/analysis.ipynb` over the runs listed
+in it and saves the figures below to `results/figures/`.
+
+The dataset is 30 labeled cases in `data/cases.jsonl`, each tagged with what makes it hard
+(distractor amounts, relative due dates, non-USD currencies, noisy text…). Three runs were made:
+a baseline, one after clarifying the field descriptions, and one after fixing the `hardware`
+category definition.
+
+### Findings
+
+**Fixing the specification moved accuracy more than choosing a model.** Most baseline errors
+were ambiguities in the schema, not model mistakes: whether a bare "$" means USD, whether an
+order number counts as the invoice number, whether "Invoice #" belongs in it, which category chair
+mats fall under. Clarifying the descriptions took gpt-6.1-terra from 87.8% to 96.7% of
+predictions fully correct.
+
+![Accuracy per model across the three runs](results/figures/spec_iterations.svg)
+
+**Thirty cases cannot rank these models; cost can.** After the fixes, every model gets 91–100%
+of predictions fully correct, and all their 95% intervals overlap: 30 cases are too few to
+separate them. Cost per 1,000 invoices spans 60×, from $0.10 (gpt-6-luna) to $6.15
+(claude-opus-5-5). Prices alone don't explain the order: claude-sonnet-5-5 and gpt-6.1-sol
+charge the same per token, but the same request counts 1,154 input tokens on Claude and 535 on
+OpenAI, so sonnet costs $3.10 per 1,000 invoices and sol $1.62.
+
+![Accuracy vs cost per model](results/figures/accuracy_vs_cost.svg)
+
+**The remaining errors are in two fields, and they teach different lessons.**
+
+![Error rate per model and field](results/figures/field_errors.svg)
+
+- *Due dates: valid shape, absurd value.* On one OCR-damaged invoice (`inv-017`, with `0` for
+  `O` throughout), all three OpenAI models return due dates in the years 1000–1089 in most
+  repeats. Every one passes the schema, which only requires a date. Constrained decoding
+  guarantees shape, not truth (1.5); a rule such as "the due date is not before the invoice
+  date" has to be checked in code.
+- *Currencies: run-to-run variation.* The two smallest models sometimes answer `other` for GBP,
+  JPY, CAD or EUR. With the currency description unchanged between the last two runs,
+  gpt-6-luna made no currency errors in one and six in the other. A single run's differences
+  on a small model can be noise (1.3); compare runs with their intervals.
+
+**Every model answers in under 2 seconds at the median.** Answers are about 100 output tokens,
+reasoning included. The Claude models had the lowest medians, claude-haiku-5-5 the lowest at
+0.9 s; at the 95th percentile the two providers overlap.
+
+![Latency per model, median and 95th percentile](results/figures/latency.svg)
+
+### Limits
+
+- 30 cases give wide intervals; differences of a few points are not evidence.
+- Each spec version was run once, so run-to-run variation and spec effects are partly mixed.
+- The descriptions were fixed using errors on these same 30 cases, so later runs are an
+  optimistic estimate; a fresh set of cases is the fair test.
+- Single calls on short documents: no agent loop, no long context and no prompt caching, so
+  the 1.1 history growth, 1.2 degradation and 1.7 cache savings are not measured here.

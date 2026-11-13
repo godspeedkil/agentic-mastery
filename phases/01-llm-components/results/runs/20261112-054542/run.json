@@ -1,0 +1,17 @@
+{
+  "run_id": "20261112-054542",
+  "started_at": "2026-11-12T05:45:42.786430Z",
+  "git_commit": "2851b2f13e1e5d0366ebc84d0d18a35d7dc1fce9",
+  "models": [
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6-luna"
+  ],
+  "cases": 30,
+  "repeats": 3,
+  "system_prompt": "You extract structured data from invoices, receipts and billing messages for an accounts-payable system. Follow each field's description in the schema exactly. When a document mentions several amounts or references, choose the one the field describes. Never guess: use null where the schema allows it and the document does not say.",
+  "max_tokens": 8192
+}
