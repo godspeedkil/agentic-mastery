@@ -147,6 +147,58 @@ included. That makes this cost per task, not price per token.
 - **Enforce hard constraints in code, not in the prompt.** If an action must never happen, the
   tool should refuse it. The prompt explains the rule; the code guarantees it.
 
+### In the code
+
+Output has its own cap, set on every request (`core/src/core/llm/types.py`):
+
+```python
+max_tokens: PositiveInt = 1024
+```
+
+The benchmark raises it, because reasoning spends the same budget
+(`phases/01-llm-components/src/p01/run.py`):
+
+```python
+MAX_TOKENS = 8192
+"""Generous, because current models think before answering and thinking counts as output."""
+```
+
+Hitting a limit is never silent. Each adapter maps its provider's reasons to one normalized
+stop reason; Anthropic reports a full context window separately, and it lands in the same
+bucket (`core/src/core/llm/anthropic_provider.py`):
+
+```python
+"max_tokens": "max_tokens",
+"model_context_window_exceeded": "max_tokens",
+```
+
+A cut-off answer is refused rather than half-parsed (`core/src/core/llm/client.py`):
+
+```python
+if response.stop_reason in UNPARSEABLE_STOP_REASONS:  # {"max_tokens", "refusal"}
+    raise StructuredOutputError(...)
+```
+
+The document goes in tags, with the instructions kept apart in the system prompt
+(`phases/01-llm-components/src/p01/run.py`):
+
+```python
+document = f"<document>\n{case.text}\n</document>"
+return Request(
+    model=model.id, system=SYSTEM_PROMPT, messages=[Message.user(document)], max_tokens=MAX_TOKENS
+)
+```
+
+Hard constraints are enforced in code: the prompt asks for the schema, and the client accepts
+only what validates against it (`core/src/core/llm/client.py`):
+
+```python
+value = output_type.model_validate_json(response.text)
+```
+
+Every request here is one short document, so nothing in this phase gets near the window.
+Degradation with length shows up once agents accumulate history.
+
 ## 1.3 Sampling and non-determinism
 
 ### Decoding
