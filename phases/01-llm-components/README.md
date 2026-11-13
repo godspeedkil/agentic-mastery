@@ -602,6 +602,60 @@ the n² term.
   ([Anthropic, 2025](https://www.anthropic.com/research/reasoning-models-dont-say-think)).
   Use it for debugging, not as an explanation.
 
+### In the code
+
+Thinking is billed as output, so `Usage` (1.1) counts it inside `output_tokens` and reports
+the share separately. A validator rejects a usage report that claims more reasoning than
+output (`core/src/core/llm/records.py`):
+
+```python
+@model_validator(mode="after")
+def _reasoning_within_output(self) -> Self:
+    if self.reasoning_tokens > self.output_tokens:
+        raise ValueError("reasoning_tokens cannot exceed output_tokens")
+    return self
+```
+
+Each adapter reads the share from its provider's usage report:
+
+```python
+reasoning_tokens = (details.thinking_tokens if details else 0,)  # anthropic_provider.py
+reasoning_tokens = (usage.output_tokens_details.reasoning_tokens,)  # openai_provider.py
+```
+
+Reasoning content arrives alongside the answer: Anthropic sends `thinking` blocks
+(`redacted_thinking` when the content is withheld), OpenAI sends `reasoning` items. The
+adapters drop them when building the normalized `Response`, keeping only the answer text
+(`core/src/core/llm/anthropic_provider.py`, then `openai_provider.py`):
+
+```python
+SKIPPED_BLOCK_TYPES = {"thinking", "redacted_thinking"}
+"""Reasoning blocks: billed through usage, not part of the answer text."""
+
+for block in message.content:
+    if block.type == "text":
+        content.append(TextBlock(text=block.text))
+    elif block.type not in SKIPPED_BLOCK_TYPES:
+        raise ValueError(f"unsupported Anthropic content block: {block.type!r}")
+```
+
+```python
+for item in response.output:
+    if item.type == "reasoning":
+        continue
+```
+
+Dropping reasoning is safe here because each call stands alone. In tool loops, earlier
+reasoning must be kept and passed back as the provider requires.
+
+`Request` has no effort setting, so every model reasons at its provider's default. The
+benchmark records how much each one spends: `group` holds one model's predictions
+(`phases/01-llm-components/src/p01/analysis.py`):
+
+```python
+"reasoning_tokens": group["reasoning_tokens"].mean(),
+```
+
 ## 1.7 Prompt caching and latency
 
 ### Prompt caching
