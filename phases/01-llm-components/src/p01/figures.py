@@ -11,9 +11,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.collections import LineCollection
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter, MultipleLocator, PercentFormatter
+from matplotlib.transforms import Bbox
 
 from p01.models import MODELS
 
@@ -85,19 +87,8 @@ def accuracy_vs_cost(summary: pd.DataFrame) -> Figure:
             markeredgewidth=2,
             zorder=3,
         )
-    for model, above in _label_sides(summary).items():
-        row = summary.loc[model]
-        ax.annotate(
-            model,
-            (row.cost_per_1k_usd, row.exact_rate),
-            xytext=(0, 10 if above else -16),
-            textcoords="offset points",
-            ha="center",
-            fontsize=9,
-            color=TEXT,
-        )
     ax.set_xscale("log")
-    ax.set_xlim(summary.cost_per_1k_usd.min() / 2, summary.cost_per_1k_usd.max() * 2)
+    ax.set_xlim(summary.cost_per_1k_usd.min() / 3, summary.cost_per_1k_usd.max() * 3)
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:g}"))
     ax.set_ylim(summary.ci_low.min() - 0.03, 1.04)
     ax.yaxis.set_major_locator(MultipleLocator(0.05))
@@ -106,23 +97,84 @@ def accuracy_vs_cost(summary: pd.DataFrame) -> Figure:
     ax.set_ylabel("All six fields correct")
     ax.set_title("Accuracy vs cost per model")
     _provider_legend(ax)
+    points = summary.sort_values("cost_per_1k_usd")[["cost_per_1k_usd", "exact_rate"]]
+    _place_labels(ax, {str(model): (x, y) for model, (x, y) in points.iterrows()})
     return fig
 
 
-def _label_sides(summary: pd.DataFrame) -> dict[str, bool]:
-    """Label above each point, except below when it would collide with a close neighbor."""
-    sides: dict[str, bool] = {}
-    previous = None
-    for model, row in summary.sort_values("cost_per_1k_usd").iterrows():
-        above = True
-        if previous is not None:
-            near_x = abs(np.log10(row.cost_per_1k_usd / previous.cost_per_1k_usd)) < 0.45
-            near_y = abs(row.exact_rate - previous.exact_rate) < 0.03
-            if near_x and near_y:
-                above = not sides[previous.name]
-        sides[model] = above
-        previous = row
-    return sides
+LABEL_SPOTS = (
+    ((8, 0), "left", "center"),
+    ((-8, 0), "right", "center"),
+    ((6, 6), "left", "bottom"),
+    ((-6, 6), "right", "bottom"),
+    ((6, -6), "left", "top"),
+    ((-6, -6), "right", "top"),
+    ((0, 9), "center", "bottom"),
+    ((0, -9), "center", "top"),
+)
+"""Spots for a label, in points from its marker, in order of preference: beside the marker,
+then diagonally off it (which clears its own vertical error bar), then straight above or
+below."""
+
+
+def _place_labels(ax, points: dict[str, tuple[float, float]]) -> None:
+    """Label each point at the first spot whose text box hits no mark, label or legend.
+
+    Call after scales, limits and the legend are set: screen positions depend on them.
+    If every spot collides, the one with the fewest collisions wins; no label is dropped.
+    """
+    renderer = ax.figure.canvas.get_renderer()
+    frame = ax.get_window_extent(renderer)
+    boxes = [_extent(artist, renderer) for artist in [*ax.lines, *ax.collections]]
+    taken = [box.padded(2) for box in boxes if np.isfinite(box.bounds).all()]
+    if (legend := ax.get_legend()) is not None:
+        taken.append(legend.get_window_extent(renderer))
+    for name, xy in points.items():
+        candidates = []
+        for offset, ha, va in LABEL_SPOTS:
+            label = ax.annotate(
+                name,
+                xy,
+                xytext=offset,
+                textcoords="offset points",
+                ha=ha,
+                va=va,
+                fontsize=9,
+                color=TEXT,
+            )
+            candidates.append((label, _widen(label.get_window_extent(renderer), ha)))
+        chosen, box = min(candidates, key=lambda c: _collisions(c[1], frame, taken))
+        for label, _ in candidates:
+            if label is not chosen:
+                label.remove()
+        taken.append(box)
+
+
+FONT_SLACK = 0.25
+"""Extra width allowed per label. The SVG names fonts instead of embedding them, and the
+viewer's fallback font (Verdana, Helvetica...) can be wider than the one measured here."""
+
+
+def _widen(box: Bbox, ha: str) -> Bbox:
+    """Grow a text box on the side facing away from its anchor, keeping the anchor fixed."""
+    extra = box.width * FONT_SLACK
+    grow = {"left": (0, extra), "right": (extra, 0)}.get(ha, (extra / 2, extra / 2))
+    return Bbox.from_extents(box.x0 - grow[0], box.y0, box.x1 + grow[1], box.y1)
+
+
+def _collisions(box: Bbox, frame: Bbox, taken: list[Bbox]) -> int:
+    """How badly a label box fits: leaving the plot counts as one collision, like a hit."""
+    outside = not (frame.contains(box.x0, box.y0) and frame.contains(box.x1, box.y1))
+    return int(outside) + sum(box.overlaps(other) for other in taken)
+
+
+def _extent(artist, renderer) -> Bbox:
+    """Screen box of a mark. Line collections (error bars) report an empty window extent,
+    so their box is built from their line segments instead."""
+    if isinstance(artist, LineCollection) and artist.get_paths():
+        transform = artist.get_transform()
+        return Bbox.union([path.get_extents(transform) for path in artist.get_paths()])
+    return artist.get_window_extent(renderer)
 
 
 def spec_iterations(runs: Sequence[tuple[str, pd.DataFrame]]) -> Figure:

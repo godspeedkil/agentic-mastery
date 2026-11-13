@@ -5,6 +5,7 @@ matplotlib.use("Agg")  # draw without a display, as in CI
 import pandas as pd
 import pytest
 from matplotlib.figure import Figure
+from matplotlib.transforms import Bbox
 
 from p01 import figures
 
@@ -41,9 +42,21 @@ def test_each_chart_draws(draw):
     assert isinstance(draw(), Figure)
 
 
-def test_close_points_get_labels_on_opposite_sides():
-    sides = figures._label_sides(SUMMARY)
-    assert sides["claude-haiku-5-5"] != sides["gpt-6-luna"]
+def test_labels_of_close_points_do_not_overlap():
+    figures.apply_style()
+    fig = figures.accuracy_vs_cost(SUMMARY)
+    ax = fig.axes[0]
+    renderer = fig.canvas.get_renderer()
+    first, second = (text.get_window_extent(renderer) for text in ax.texts)
+    assert {text.get_text() for text in ax.texts} == set(MODELS)
+    assert not first.overlaps(second)
+
+
+def test_widen_keeps_the_anchored_edge():
+    box = Bbox.from_extents(10, 0, 50, 10)
+    assert figures._widen(box, "left").x0 == 10
+    assert figures._widen(box, "right").x1 == 50
+    assert figures._widen(box, "left").width == pytest.approx(40 * (1 + figures.FONT_SLACK))
 
 
 def test_saved_svg_is_reproducible(tmp_path):
