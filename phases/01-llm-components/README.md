@@ -305,9 +305,6 @@ low, high = wilson_interval(group["exact"].mean(), n=per_case.ngroups)
 "any_repeat_correct": per_case.any().mean(),    # right at least once (pass@k)
 ```
 
-Not yet done: the call ledger records the model, usage and stop reason of every call, but not
-the full prompt and response, so a single call can't be replayed from the logs.
-
 ## 1.4 Messages, system prompts and prompting
 
 ### Anatomy of a request
@@ -351,6 +348,60 @@ Stronger:
 > widget. Help only with Acme's products. If a customer asks about another vendor, say you can
 > only speak to Acme and point them to the Acme feature that meets their need, because
 > comparisons we can't verify may be inaccurate.
+
+### In the code
+
+Messages carry only `user` and `assistant` turns, each a list of content blocks; the system
+prompt is a separate field (`core/src/core/llm/types.py`):
+
+```python
+Role = Literal["user", "assistant"]
+
+
+class Message(BaseModel):
+    role: Role
+    content: list[ContentBlock] = Field(min_length=1)
+```
+
+Each adapter puts the system prompt where its provider expects it:
+
+```python
+params["system"] = request.system  # anthropic_provider.py
+params["instructions"] = request.system  # openai_provider.py
+```
+
+The API is stateless, so the application owns the conversation. When an answer fails
+validation, the client sends the whole exchange again with two turns appended
+(`core/src/core/llm/client.py`):
+
+```python
+def repair_turns(answer: str, error: ValidationError) -> list[Message]:
+    feedback = f"Your answer did not validate:\n{error}\nReply with the corrected JSON only."
+    return [Message.assistant(answer), Message.user(feedback)]
+```
+
+The system prompt states role and context, the task, and what to do when information is
+missing (`phases/01-llm-components/src/p01/run.py`):
+
+```python
+SYSTEM_PROMPT = (
+    "You extract structured data from invoices, receipts and billing messages for an "
+    "accounts-payable system. Follow each field's description in the schema exactly. "
+    "When a document mentions several amounts or references, choose the one the field "
+    "describes. Never guess: use null where the schema allows it and the document does "
+    "not say."
+)
+```
+
+Most of the instructions live in the schema: each field's docstring becomes its description,
+which the model reads. They say what to do, including the hard cases
+(`phases/01-llm-components/src/p01/schema.py`):
+
+```python
+currency: Currency
+"""ISO code of the currency the total is stated in. A bare "$" means USD unless the
+document shows another dollar currency, such as "CA$". "other" for unlisted currencies."""
+```
 
 ## 1.5 Structured outputs
 
