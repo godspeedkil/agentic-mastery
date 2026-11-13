@@ -250,6 +250,64 @@ into probabilities, and a decoding strategy picks one token.
   low for extraction, classification and tool calls; higher for diverse candidates. Tune only
   against an eval.
 
+### In the code
+
+`Request` has no sampling parameters, and it rejects unknown fields, so passing one fails
+before anything is sent (`core/src/core/llm/types.py`):
+
+```python
+class Request(BaseModel):
+    """What to send. Sampling parameters are deliberately absent: current models reject them."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", use_attribute_docstrings=True)
+```
+
+`Request(model="m", messages=[...], temperature=0)` raises a `ValidationError`.
+
+Models change behind aliases, so the response keeps the ID the provider actually served:
+
+```python
+model: str
+"""Model ID reported by the provider, which may differ from the requested alias."""
+```
+
+Unit tests replay recorded provider responses instead of calling the API
+(`core/tests/test_llm_anthropic_provider.py`):
+
+```python
+def load_message(name: str, **overrides) -> AnthropicMessage:
+    data = json.loads((FIXTURES / name).read_text())
+    return AnthropicMessage.model_validate(data | overrides)
+```
+
+The benchmark is the eval: every case runs several times
+(`phases/01-llm-components/src/p01/run.py`):
+
+```python
+jobs = [(model, case, r) for model in models for case in cases for r in range(1, repeats + 1)]
+```
+
+Scoring asserts properties, not exact strings: names compare on letters and digits only, and
+totals within half a cent (`phases/01-llm-components/src/p01/scoring.py`):
+
+```python
+"vendor": normalize_name(predicted.vendor) == normalize_name(expected.vendor),
+"total": abs(predicted.total - expected.total) < CENT,
+```
+
+Rates come with uncertainty, counted over cases rather than calls, because repeats of one case
+are correlated and input variation dominates (`phases/01-llm-components/src/p01/analysis.py`):
+
+```python
+low, high = wilson_interval(group["exact"].mean(), n=per_case.ngroups)
+...
+"all_repeats_correct": per_case.all().mean(),   # reliable every time (pass^k)
+"any_repeat_correct": per_case.any().mean(),    # right at least once (pass@k)
+```
+
+Not yet done: the call ledger records the model, usage and stop reason of every call, but not
+the full prompt and response, so a single call can't be replayed from the logs.
+
 ## 1.4 Messages, system prompts and prompting
 
 ### Anatomy of a request
