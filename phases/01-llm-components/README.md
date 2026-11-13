@@ -710,3 +710,65 @@ latency ≈ time to first token (queue + prefill) + output tokens ÷ output spee
   for routine steps, parallel independent calls, caching, and streaming for perceived latency.
 - Measure p50 and p95, not means. Batch APIs trade hours of delay for about 50% off — suited to
   evals and offline jobs.
+
+### In the code
+
+Every benchmark request has the same stable prefix and differs only at the end: the fixed
+`SYSTEM_PROMPT` and schema come first, the invoice last (`phases/01-llm-components/src/p01/run.py`,
+from 1.2):
+
+```python
+document = f"<document>\n{case.text}\n</document>"
+return Request(
+    model=model.id, system=SYSTEM_PROMPT, messages=[Message.user(document)], max_tokens=MAX_TOKENS
+)
+```
+
+The client sets no cache breakpoints, so Anthropic calls are not cached, and OpenAI caches
+automatically only past its minimum prompt length. When caching does happen, each adapter
+reports it in the `Usage` fields from 1.1 (`core/src/core/llm/anthropic_provider.py`):
+
+```python
+cache_read_tokens = (usage.cache_read_input_tokens or 0,)
+cache_write_tokens = (usage.cache_creation_input_tokens or 0,)
+```
+
+Every attempt is timed. `self._clock` is `time.perf_counter` by default, a monotonic timer;
+tests pass a fake clock to control time (`core/src/core/llm/client.py`, `LLMClient._attempt`):
+
+```python
+start = self._clock()
+if deliver is None:
+    response = adapter.complete(request)
+else:
+    response, first_token_at = self._consume(adapter.stream(request), deliver)
+    if first_token_at is not None:
+        ttft_ms = (first_token_at - start) * 1000
+latency_ms = (self._clock() - start) * 1000
+```
+
+`deliver` is set only when the caller streams. Time to first token can only be measured then:
+`_consume` reads the stream's events and notes when the first piece of text arrives:
+
+```python
+for event in events:
+    if isinstance(event, TextDelta):
+        if first_token_at is None:
+            first_token_at = self._clock()
+        deliver(event.text)
+```
+
+The benchmark's calls are independent, so it runs them in parallel; `workers` defaults to 8
+(`phases/01-llm-components/src/p01/run.py`, `run_benchmark`):
+
+```python
+with ThreadPoolExecutor(max_workers=workers) as pool:
+```
+
+And it reports latency as percentiles, not means; `group` holds one model's predictions
+(`phases/01-llm-components/src/p01/analysis.py`):
+
+```python
+"latency_p50_s": group["latency_ms"].quantile(0.50) / 1000,
+"latency_p95_s": group["latency_ms"].quantile(0.95) / 1000,
+```
