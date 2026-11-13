@@ -772,3 +772,95 @@ And it reports latency as percentiles, not means; `group` holds one model's pred
 "latency_p50_s": group["latency_ms"].quantile(0.50) / 1000,
 "latency_p95_s": group["latency_ms"].quantile(0.95) / 1000,
 ```
+
+## Lab: an invoice-extraction benchmark
+
+The lab puts the client to work on a small, realistic task: extract six fields from invoices,
+receipts and billing messages, on six models from two providers, and measure accuracy, cost
+and latency.
+
+### How one prediction flows
+
+```mermaid
+flowchart TD
+    A["run_benchmark<br/>one job per model × case × repeat"] --> B["build_request<br/>SYSTEM_PROMPT + document"]
+    B --> C["LLMClient.parse<br/>sets output_type = Invoice"]
+    C --> D["LLMClient.complete<br/>retries retryable errors"]
+    D --> E["provider adapter<br/>Request → SDK params + JSON Schema"]
+    E --> F[("Anthropic / OpenAI API")]
+    F --> G["provider adapter<br/>reply → Response: text, stop reason, Usage"]
+    G --> H["CallRecord<br/>usage, cost, latency"]
+    H --> I[("calls.jsonl")]
+    G --> J{"validates as Invoice?"}
+    J -- "no" --> K["repair turns"] --> D
+    J -- "yes" --> L["score<br/>field by field vs. expected"]
+    L --> M[("predictions.jsonl")]
+    I --> N["analysis.ipynb → figures"]
+    M --> N
+```
+
+### Running it
+
+```bash
+uv run poe bench --limit 2 --repeats 1 --models claude-haiku-5-5  # cheap smoke test
+uv run poe bench   # all models, all cases, 3 repeats
+uv run poe report  # re-run the notebook and redraw the figures
+```
+
+`poe bench` calls paid APIs. Each run writes a folder under `results/runs/`: `run.json` (models,
+prompt, git commit), `calls.jsonl` (one `CallRecord` per attempt) and `predictions.jsonl` (one
+scored prediction per job). `poe report` executes `results/analysis.ipynb` over the runs listed
+in it and saves the figures below to `results/figures/`.
+
+The dataset is 30 labeled cases in `data/cases.jsonl`, each tagged with what makes it hard
+(distractor amounts, relative due dates, non-USD currencies, noisy text…). Three runs were made:
+a baseline, one after clarifying the field descriptions, and one after fixing the `hardware`
+category definition.
+
+### Findings
+
+**Fixing the specification moved accuracy more than choosing a model.** Most baseline errors
+were ambiguities in the schema, not model mistakes: whether a bare "$" means USD, whether an
+order number counts as the invoice number, whether "Invoice #" belongs in it, which category chair
+mats fall under. Clarifying the descriptions took gpt-6.1-terra from 87.8% to 96.7% of
+predictions fully correct.
+
+![Accuracy per model across the three runs](results/figures/spec_iterations.svg)
+
+**Thirty cases cannot rank these models; cost can.** After the fixes, every model gets 91–100%
+of predictions fully correct, and all their 95% intervals overlap: 30 cases are too few to
+separate them. Cost per 1,000 invoices spans 60×, from $0.10 (gpt-6-luna) to $6.15
+(claude-opus-5-5). Prices alone don't explain the order: claude-sonnet-5-5 and gpt-6.1-sol
+charge the same per token, but the same request counts 1,154 input tokens on Claude and 535 on
+OpenAI, so sonnet costs $3.10 per 1,000 invoices and sol $1.62.
+
+![Accuracy vs cost per model](results/figures/accuracy_vs_cost.svg)
+
+**The remaining errors are in two fields, and they teach different lessons.**
+
+![Error rate per model and field](results/figures/field_errors.svg)
+
+- *Due dates: valid shape, absurd value.* On one OCR-damaged invoice (`inv-017`, with `0` for
+  `O` throughout), all three OpenAI models return due dates in the years 1000–1089 in most
+  repeats. Every one passes the schema, which only requires a date. Constrained decoding
+  guarantees shape, not truth (1.5); a rule such as "the due date is not before the invoice
+  date" has to be checked in code.
+- *Currencies: run-to-run variation.* The two smallest models sometimes answer `other` for GBP,
+  JPY, CAD or EUR. With the currency description unchanged between the last two runs,
+  gpt-6-luna made no currency errors in one and six in the other. A single run's differences
+  on a small model can be noise (1.3); compare runs with their intervals.
+
+**Every model answers in under 2 seconds at the median.** Answers are about 100 output tokens,
+reasoning included. The Claude models had the lowest medians, claude-haiku-5-5 the lowest at
+0.9 s; at the 95th percentile the two providers overlap.
+
+![Latency per model, median and 95th percentile](results/figures/latency.svg)
+
+### Limits
+
+- 30 cases give wide intervals; differences of a few points are not evidence.
+- Each spec version was run once, so run-to-run variation and spec effects are partly mixed.
+- The descriptions were fixed using errors on these same 30 cases, so later runs are an
+  optimistic estimate; a fresh set of cases is the fair test.
+- Single calls on short documents: no agent loop, no long context and no prompt caching, so
+  the 1.1 history growth, 1.2 degradation and 1.7 cache savings are not measured here.
