@@ -59,6 +59,58 @@ What the numbers show:
 - **Compare models on cost per completed task, not price per token.** A model that finishes in
   fewer steps or writes shorter outputs can cost less even at a higher rate.
 
+### In the code
+
+The client turns each provider's usage report into one shape (`core/src/core/llm/records.py`,
+condensed):
+
+```python
+class Usage(BaseModel):
+    input_tokens: NonNegativeInt = 0  # base input rate
+    cache_read_tokens: NonNegativeInt = 0  # cache-read rate
+    cache_write_tokens: NonNegativeInt = 0  # cache-write rate
+    output_tokens: NonNegativeInt = 0  # output rate, reasoning included
+    reasoning_tokens: NonNegativeInt = 0  # the reasoning share of output_tokens
+```
+
+The three input counts never overlap, so each input token gets exactly one rate. Reasoning is
+billed as output, so it sits inside `output_tokens` instead of being added on top.
+
+Providers report this differently. OpenAI counts cached tokens inside `input_tokens`, so its
+adapter takes them out (`core/src/core/llm/openai_provider.py`):
+
+```python
+uncached = usage.input_tokens - details.cached_tokens - details.cache_write_tokens
+```
+
+Pricing is the per-million arithmetic from Billing (`core/src/core/llm/pricing.py`):
+
+```python
+total = usage.input_tokens * self.input + usage.output_tokens * self.output
+for tokens, rate in [
+    (usage.cache_read_tokens, self.cache_read),
+    (usage.cache_write_tokens, self.cache_write),
+]:
+    if tokens == 0:
+        continue
+    if rate is None:
+        return None
+    total += tokens * rate
+return total / TOKENS_PER_UNIT
+```
+
+A missing rate returns `None`, not 0, so an unknown cost never passes for a cheap one.
+
+Models are compared per completed task (`phases/01-llm-components/src/p01/analysis.py`):
+
+```python
+"cost_per_1k_usd": group["cost_usd"].mean() * 1000,
+```
+
+Each row is one finished extraction, with the cost of all its calls summed, repair turns
+included. That makes this cost per task, not price per token.
+
+
 ## 1.2 Context windows and degradation
 
 ### The window
