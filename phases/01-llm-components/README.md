@@ -311,7 +311,8 @@ low, high = wilson_interval(group["exact"].mean(), n=per_case.ngroups)
 
 - **Model** (a dated snapshot), **system prompt** (standing instructions), **messages**
   (alternating `user`/`assistant` turns made of content blocks: text, images, tool calls, tool
-  results), **tools** (Phase 2) and **parameters** (`max_tokens`, temperature, stop sequences).
+  results), **tools** (Phase 2) and **parameters** (`max_tokens`, stop sequences; sampling
+  parameters where the model still accepts them, 1.3).
 - The response carries content blocks, a **stop reason** and **usage** (token counts).
 - Providers differ in shape: where the system prompt goes, how tool calls and results are
   structured. A shared client normalizes this.
