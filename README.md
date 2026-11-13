@@ -9,7 +9,7 @@ The git history is the record: one branch and PR per phase, tagged `phase-NN` wh
 | # | Phase | Lab deliverable | Status |
 | --- | --- | --- | --- |
 | 0 | Repo setup | Workspace, tooling, CI, hooks | Done |
-| 1 | LLMs as components | Robust multi-provider client with cost ledger | Not started |
+| 1 | LLMs as components | Robust multi-provider client with cost ledger | Done |
 | 2 | Tool use and the agent loop | Framework-free agent in under 200 lines | Not started |
 | 3 | Context engineering and memory | Research agent with compaction and memory | Not started |
 | 4 | Workflow patterns | One task, three architectures, compared | Not started |
