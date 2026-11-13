@@ -453,6 +453,80 @@ validation error back and retry once or twice.
   ([Tam et al., 2024](https://arxiv.org/abs/2408.02442)). For hard tasks, reason first, then
   emit the structure.
 
+### In the code
+
+The benchmark defines the answer's shape once, as a Pydantic model
+(`phases/01-llm-components/src/p01/schema.py`):
+
+```python
+Currency = Literal["USD", "EUR", "GBP", "JPY", "CAD", "other"]
+Category = Literal["software", "hardware", "services", "travel", "office_supplies", "other"]
+
+
+class Invoice(BaseModel):
+    vendor: str
+    invoice_number: str | None
+    total: float
+    currency: Currency
+    due_date: date | None
+    category: Category
+```
+
+Categories are closed sets, each ending in `"other"` so nothing is forced into a wrong value.
+"Not present" is `None` (JSON `null`) in the field's type, not a sentinel string.
+
+A request says which shape it wants through its `output_type` field. The field holds a class,
+not an instance: the type the answer must match (`core/src/core/llm/types.py`):
+
+```python
+class Request(BaseModel):
+    ...
+    output_type: type[BaseModel] | None = None
+    """When set, the provider constrains the answer to this model's JSON Schema."""
+```
+
+The benchmark hands `Invoice` to the client's `parse` method
+(`phases/01-llm-components/src/p01/run.py`):
+
+```python
+parsed = client.parse(model.provider, build_request(case, model), Invoice, labels=labels)
+```
+
+`parse` receives it as its `output_type` argument, sets it on the request, and after the call
+validates the answer into the same class (`core/src/core/llm/client.py`):
+
+```python
+def parse(self, provider, request, output_type, *, max_repairs=1, labels=None):
+    request = request.model_copy(update={"output_type": output_type})
+    for _ in range(max_repairs + 1):
+        completion = self.complete(provider, request, labels=labels)
+        ...
+        value = output_type.model_validate_json(completion.response.text)
+```
+
+Each provider adapter reads `request.output_type` and turns the class into the JSON Schema its
+provider's constrained decoding accepts:
+
+```python
+# anthropic_provider.py
+schema = anthropic.transform_schema(request.output_type)
+params["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+
+# openai_provider.py
+params["text"] = {
+    "format": {
+        "type": "json_schema",
+        "name": request.output_type.__name__,
+        "schema": to_strict_json_schema(request.output_type),
+        "strict": True,
+    }
+}
+```
+
+So `Invoice` both constrains what the model can generate and validates what comes back. If
+validation still fails, the error is sent back as a repair turn (1.4), at most `max_repairs`
+times.
+
 ## 1.6 Reasoning models
 
 ### What changes
