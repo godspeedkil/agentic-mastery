@@ -61,8 +61,7 @@ What the numbers show:
 
 ### In the code
 
-The client turns each provider's usage report into one shape (`core/src/core/llm/records.py`,
-condensed):
+The client turns each provider's usage report into one shape (`core/src/core/llm/records.py`):
 
 ```python
 class Usage(BaseModel):
@@ -76,16 +75,21 @@ class Usage(BaseModel):
 The three input counts never overlap, so each input token gets exactly one rate. Reasoning is
 billed as output, so it sits inside `output_tokens` instead of being added on top.
 
-Providers report this differently. OpenAI counts cached tokens inside `input_tokens`, so its
-adapter takes them out (`core/src/core/llm/openai_provider.py`):
+Providers report this differently. OpenAI counts cached tokens inside its `input_tokens`, so
+its adapter takes them out. Here `usage` is OpenAI's usage object and `details` its
+breakdown of input tokens (`core/src/core/llm/openai_provider.py`):
 
 ```python
 uncached = usage.input_tokens - details.cached_tokens - details.cache_write_tokens
 ```
 
-Pricing is the per-million arithmetic from Billing (`core/src/core/llm/pricing.py`):
+Pricing is the per-million arithmetic from Billing. `ModelPrice` holds one model's rates in
+USD per million tokens (`self.input`, `self.output`, `self.cache_read`, `self.cache_write`),
+and its `cost` method prices one call's `Usage` (`core/src/core/llm/pricing.py`):
 
 ```python
+TOKENS_PER_UNIT = 1_000_000
+
 total = usage.input_tokens * self.input + usage.output_tokens * self.output
 for tokens, rate in [
     (usage.cache_read_tokens, self.cache_read),
@@ -101,15 +105,15 @@ return total / TOKENS_PER_UNIT
 
 A missing rate returns `None`, not 0, so an unknown cost never passes for a cheap one.
 
-Models are compared per completed task (`phases/01-llm-components/src/p01/analysis.py`):
+Models are compared per completed task. The analysis builds one row per finished extraction,
+summing the cost of every call behind it, repair turns included; `group` holds one model's
+rows (`phases/01-llm-components/src/p01/analysis.py`):
 
 ```python
 "cost_per_1k_usd": group["cost_usd"].mean() * 1000,
 ```
 
-Each row is one finished extraction, with the cost of all its calls summed, repair turns
-included. That makes this cost per task, not price per token.
-
+That makes this cost per task, not price per token.
 
 ## 1.2 Context windows and degradation
 
@@ -149,7 +153,8 @@ included. That makes this cost per task, not price per token.
 
 ### In the code
 
-Output has its own cap, set on every request (`core/src/core/llm/types.py`):
+Output has its own cap, set on every request. `Request` is the client's description of one
+call (`core/src/core/llm/types.py`):
 
 ```python
 max_tokens: PositiveInt = 1024
@@ -163,24 +168,31 @@ MAX_TOKENS = 8192
 """Generous, because current models think before answering and thinking counts as output."""
 ```
 
-Hitting a limit is never silent. Each adapter maps its provider's reasons to one normalized
-stop reason; Anthropic reports a full context window separately, and it lands in the same
-bucket (`core/src/core/llm/anthropic_provider.py`):
+Hitting a limit is never silent. Each adapter maps its provider's reasons for stopping to one
+normalized stop reason. Anthropic reports a full context window separately, and it lands in
+the same bucket as a full output budget (`core/src/core/llm/anthropic_provider.py`):
 
 ```python
-"max_tokens": "max_tokens",
-"model_context_window_exceeded": "max_tokens",
+STOP_REASONS: dict[str, StopReason] = {
+    "max_tokens": "max_tokens",
+    "model_context_window_exceeded": "max_tokens",
+    ...
+}
 ```
 
-A cut-off answer is refused rather than half-parsed (`core/src/core/llm/client.py`):
+The client refuses to parse an answer that stopped for one of these reasons and raises its
+own error instead. `response` is the normalized reply to the call (`core/src/core/llm/client.py`):
 
 ```python
-if response.stop_reason in UNPARSEABLE_STOP_REASONS:  # {"max_tokens", "refusal"}
+UNPARSEABLE_STOP_REASONS = {"max_tokens", "refusal"}
+
+if response.stop_reason in UNPARSEABLE_STOP_REASONS:
     raise StructuredOutputError(...)
 ```
 
-The document goes in tags, with the instructions kept apart in the system prompt
-(`phases/01-llm-components/src/p01/run.py`):
+The document goes in tags, with the instructions kept apart in the system prompt.
+`SYSTEM_PROMPT` is a string constant holding those instructions, `case.text` is the invoice
+being extracted, and `Message.user` builds a user turn (`phases/01-llm-components/src/p01/run.py`):
 
 ```python
 document = f"<document>\n{case.text}\n</document>"
@@ -189,8 +201,9 @@ return Request(
 )
 ```
 
-Hard constraints are enforced in code: the prompt asks for the schema, and the client accepts
-only what validates against it (`core/src/core/llm/client.py`):
+Hard constraints are enforced in code: the prompt asks for a schema, and the client accepts
+only what validates against it. `output_type` is the Pydantic class the answer must match
+(1.5); `model_validate_json` raises if the text doesn't fit it (`core/src/core/llm/client.py`):
 
 ```python
 value = output_type.model_validate_json(response.text)
@@ -252,8 +265,8 @@ into probabilities, and a decoding strategy picks one token.
 
 ### In the code
 
-`Request` has no sampling parameters, and it rejects unknown fields, so passing one fails
-before anything is sent (`core/src/core/llm/types.py`):
+`Request`, the client's description of one call, has no sampling parameters, and it rejects
+unknown fields, so passing one fails before anything is sent (`core/src/core/llm/types.py`):
 
 ```python
 class Request(BaseModel):
@@ -264,14 +277,16 @@ class Request(BaseModel):
 
 `Request(model="m", messages=[...], temperature=0)` raises a `ValidationError`.
 
-Models change behind aliases, so the response keeps the ID the provider actually served:
+Models change behind aliases, so `Response`, the normalized reply, keeps the ID the provider
+actually served:
 
 ```python
 model: str
 """Model ID reported by the provider, which may differ from the requested alias."""
 ```
 
-Unit tests replay recorded provider responses instead of calling the API
+Unit tests replay recorded provider responses instead of calling the API. `FIXTURES` is the
+folder of saved JSON replies, and `AnthropicMessage` is the SDK's reply type
 (`core/tests/test_llm_anthropic_provider.py`):
 
 ```python
@@ -280,15 +295,17 @@ def load_message(name: str, **overrides) -> AnthropicMessage:
     return AnthropicMessage.model_validate(data | overrides)
 ```
 
-The benchmark is the eval: every case runs several times
-(`phases/01-llm-components/src/p01/run.py`):
+The benchmark is the eval: every model runs every case several times. `models`, `cases` and
+`repeats` are the run's settings (`phases/01-llm-components/src/p01/run.py`):
 
 ```python
 jobs = [(model, case, r) for model in models for case in cases for r in range(1, repeats + 1)]
 ```
 
-Scoring asserts properties, not exact strings: names compare on letters and digits only, and
-totals within half a cent (`phases/01-llm-components/src/p01/scoring.py`):
+Scoring asserts properties, not exact strings. It compares each `predicted` field with the
+labeled `expected` one: names on letters and digits only (`normalize_name` drops case,
+punctuation and spacing), totals within half a cent (`CENT = 0.005`)
+(`phases/01-llm-components/src/p01/scoring.py`):
 
 ```python
 "vendor": normalize_name(predicted.vendor) == normalize_name(expected.vendor),
@@ -296,13 +313,17 @@ totals within half a cent (`phases/01-llm-components/src/p01/scoring.py`):
 ```
 
 Rates come with uncertainty, counted over cases rather than calls, because repeats of one case
-are correlated and input variation dominates (`phases/01-llm-components/src/p01/analysis.py`):
+are correlated and input variation dominates. `group` holds one model's predictions, each
+marked `exact` when all fields are right; `per_case` groups them by case; `wilson_interval`
+gives a 95% interval for a rate observed over `n` independent units
+(`phases/01-llm-components/src/p01/analysis.py`):
 
 ```python
+per_case = group.groupby("case_id")["exact"]
 low, high = wilson_interval(group["exact"].mean(), n=per_case.ngroups)
 ...
-"all_repeats_correct": per_case.all().mean(),   # reliable every time (pass^k)
-"any_repeat_correct": per_case.any().mean(),    # right at least once (pass@k)
+"all_repeats_correct": per_case.all().mean(),  # reliable every time (pass^k)
+"any_repeat_correct": per_case.any().mean(),  # right at least once (pass@k)
 ```
 
 ## 1.4 Messages, system prompts and prompting
@@ -352,8 +373,9 @@ Stronger:
 
 ### In the code
 
-Messages carry only `user` and `assistant` turns, each a list of content blocks; the system
-prompt is a separate field (`core/src/core/llm/types.py`):
+Messages carry only `user` and `assistant` turns, each a list of content blocks (only text so
+far; tool calls join in Phase 2). The system prompt is a separate field on `Request`
+(`core/src/core/llm/types.py`):
 
 ```python
 Role = Literal["user", "assistant"]
@@ -372,8 +394,8 @@ params["instructions"] = request.system  # openai_provider.py
 ```
 
 The API is stateless, so the application owns the conversation. When an answer fails
-validation, the client sends the whole exchange again with two turns appended
-(`core/src/core/llm/client.py`):
+validation, the client sends the whole exchange again with two turns appended: the invalid
+answer, then Pydantic's `ValidationError` as feedback (`core/src/core/llm/client.py`):
 
 ```python
 def repair_turns(answer: str, error: ValidationError) -> list[Message]:
@@ -394,8 +416,9 @@ SYSTEM_PROMPT = (
 )
 ```
 
-Most of the instructions live in the schema: each field's docstring becomes its description,
-which the model reads. They say what to do, including the hard cases
+Most of the instructions live in the schema: the Pydantic model the answer must match. Each
+field's docstring becomes its description, which the model reads. They say what to do,
+including the hard cases; `Currency` is the fixed list of allowed codes
 (`phases/01-llm-components/src/p01/schema.py`):
 
 ```python
