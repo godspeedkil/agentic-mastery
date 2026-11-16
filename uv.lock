@@ -15,6 +15,7 @@ members = [
     "agentic-mastery",
     "core",
     "p01-llm-components",
+    "p02-agent-loop",
 ]
 
 [[package]]
@@ -1338,6 +1339,17 @@ wheels = [
 name = "p01-llm-components"
 version = "0.1.0"
 source = { editable = "phases/01-llm-components" }
+dependencies = [
+    { name = "core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "core", editable = "core" }]
+
+[[package]]
+name = "p02-agent-loop"
+version = "0.1.0"
+source = { editable = "phases/02-agent-loop" }
 dependencies = [
     { name = "core" },
 ]

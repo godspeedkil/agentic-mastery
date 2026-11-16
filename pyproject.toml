@@ -34,7 +34,7 @@ target-version = "py312"
 select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["core", "p01"]
+known-first-party = ["core", "p01", "p02"]
 
 [tool.pytest.ini_options]
 testpaths = ["core/tests", "phases"]
