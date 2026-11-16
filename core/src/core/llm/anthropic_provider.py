@@ -1,5 +1,6 @@
 """Adapter between core.llm types and the Anthropic Messages API."""
 
+import json
 from collections.abc import Generator
 from contextlib import AbstractContextManager
 from typing import Any
@@ -10,7 +11,19 @@ from anthropic.types import Usage as AnthropicUsage
 
 from core.llm.errors import translate_sdk_errors
 from core.llm.records import Usage
-from core.llm.types import Request, Response, StopReason, StreamEvent, TextBlock, TextDelta
+from core.llm.types import (
+    ContentBlock,
+    Reasoning,
+    Request,
+    Response,
+    StopReason,
+    StreamEvent,
+    TextBlock,
+    TextDelta,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+)
 from core.settings import get_settings
 
 STOP_REASONS: dict[str, StopReason] = {
@@ -23,22 +36,54 @@ STOP_REASONS: dict[str, StopReason] = {
 }
 """Anthropic stop reasons we map explicitly; anything else becomes "other"."""
 
-SKIPPED_BLOCK_TYPES = {"thinking", "redacted_thinking"}
-"""Reasoning blocks: billed through usage, not part of the answer text."""
+REASONING_BLOCK_TYPES = {"thinking", "redacted_thinking"}
+"""Reasoning blocks: kept whole, because they must go back unchanged in a tool loop."""
+
+
+def to_anthropic_block(block: ContentBlock) -> dict[str, Any] | None:
+    """One content block in Anthropic's shape; None for another provider's reasoning."""
+    match block:
+        case TextBlock():
+            return {"type": "text", "text": block.text}
+        case ToolCall():
+            return {
+                "type": "tool_use",
+                "id": block.id,
+                "name": block.name,
+                "input": json.loads(block.arguments),
+            }
+        case Reasoning():
+            return block.data if block.provider == "anthropic" else None
+        case ToolResult():
+            return {
+                "type": "tool_result",
+                "tool_use_id": block.call_id,
+                "content": block.content,
+                "is_error": block.is_error,
+            }
+
+
+def to_anthropic_tool(spec: ToolSpec) -> dict[str, Any]:
+    return {
+        "name": spec.name,
+        "description": spec.description,
+        "input_schema": anthropic.transform_schema(spec.input_type),
+        "strict": True,
+    }
 
 
 def to_anthropic_params(request: Request) -> dict[str, Any]:
     """Build keyword arguments for `client.messages.create`."""
+    messages = []
+    for message in request.messages:
+        blocks = [b for b in map(to_anthropic_block, message.content) if b is not None]
+        # Anthropic requires tool results before any other content in a user message.
+        blocks.sort(key=lambda b: b["type"] != "tool_result")
+        messages.append({"role": message.role, "content": blocks})
     params: dict[str, Any] = {
         "model": request.model,
         "max_tokens": request.max_tokens,
-        "messages": [
-            {
-                "role": message.role,
-                "content": [{"type": "text", "text": block.text} for block in message.content],
-            }
-            for message in request.messages
-        ],
+        "messages": messages,
     }
     if request.system is not None:
         params["system"] = request.system
@@ -47,6 +92,8 @@ def to_anthropic_params(request: Request) -> dict[str, Any]:
     if request.output_type is not None:
         schema = anthropic.transform_schema(request.output_type)
         params["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+    if request.tools:
+        params["tools"] = [to_anthropic_tool(spec) for spec in request.tools]
     return params
 
 
@@ -63,11 +110,18 @@ def to_usage(usage: AnthropicUsage) -> Usage:
 
 
 def from_anthropic_message(message: AnthropicMessage) -> Response:
-    content = []
+    content: list[ContentBlock] = []
     for block in message.content:
         if block.type == "text":
             content.append(TextBlock(text=block.text))
-        elif block.type not in SKIPPED_BLOCK_TYPES:
+        elif block.type == "tool_use":
+            content.append(
+                ToolCall(id=block.id, name=block.name, arguments=json.dumps(block.input))
+            )
+        elif block.type in REASONING_BLOCK_TYPES:
+            data = block.model_dump(include={"type", "thinking", "signature", "data"})
+            content.append(Reasoning(provider="anthropic", data=data))
+        else:
             raise ValueError(f"unsupported Anthropic content block: {block.type!r}")
     raw = message.stop_reason
     return Response(

@@ -8,7 +8,17 @@ import pytest
 from anthropic.types import Message as AnthropicMessage
 from pydantic import BaseModel
 
-from core.llm import Message, Request, Response, TextDelta
+from core.llm import (
+    Message,
+    Reasoning,
+    Request,
+    Response,
+    TextBlock,
+    TextDelta,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+)
 from core.llm import anthropic_provider as provider_module
 from core.llm.anthropic_provider import (
     AnthropicProvider,
@@ -45,11 +55,12 @@ def test_params_carry_system_and_stop_sequences():
     assert params["stop_sequences"] == ["END"]
 
 
-def test_response_keeps_text_and_skips_thinking():
+def test_response_keeps_text_and_thinking():
     response = from_anthropic_message(load_message("message_with_thinking.json"))
     assert response.text == "The capital of France is Paris."
     assert response.model == "claude-haiku-5-5"
     assert response.stop_reason == "end_turn"
+    assert isinstance(response.content[0], Reasoning)
 
 
 def test_usage_maps_cache_and_thinking_tokens():
@@ -78,9 +89,9 @@ def test_stop_reasons_are_normalized_and_raw_value_kept(raw, expected):
 
 
 def test_unsupported_block_type_raises():
-    tool_use = {"type": "tool_use", "id": "toolu_1", "name": "search", "input": {}}
-    message = load_message("message_with_thinking.json", content=[tool_use])
-    with pytest.raises(ValueError, match="tool_use"):
+    server_tool = {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}
+    message = load_message("message_with_thinking.json", content=[server_tool])
+    with pytest.raises(ValueError, match="server_tool_use"):
         from_anthropic_message(message)
 
 
@@ -182,3 +193,57 @@ def test_output_type_sends_a_json_schema():
 
 def test_no_output_type_sends_no_schema():
     assert "output_config" not in to_anthropic_params(REQUEST_HI)
+
+
+class LookupVendor(BaseModel):
+    vendor_id: str
+
+
+LOOKUP = ToolSpec(name="lookup_vendor", description="Find a vendor.", input_type=LookupVendor)
+
+
+def test_tools_are_sent_with_strict_schemas():
+    params = to_anthropic_params(Request(model="m", messages=[Message.user("hi")], tools=[LOOKUP]))
+    [tool] = params["tools"]
+    assert tool["name"] == "lookup_vendor"
+    assert tool["description"] == "Find a vendor."
+    assert tool["input_schema"]["properties"]["vendor_id"]["type"] == "string"
+    assert tool["strict"] is True
+
+
+def test_tool_use_becomes_a_tool_call_with_json_arguments():
+    response = from_anthropic_message(load_message("message_with_tool_use.json"))
+    assert response.stop_reason == "tool_use"
+    assert response.tool_calls == [
+        ToolCall(id="toolu_01A", name="lookup_vendor", arguments='{"vendor_id": "V-1"}')
+    ]
+
+
+def test_thinking_and_tool_use_go_back_unchanged():
+    message = load_message("message_with_tool_use.json")
+    response = from_anthropic_message(message)
+    assistant = Message(role="assistant", content=response.content)
+    request = Request(model="m", messages=[Message.user("Check V-1."), assistant])
+    sent = to_anthropic_params(request)["messages"][1]["content"]
+    assert sent == [block.model_dump(exclude_none=True) for block in message.content]
+
+
+def test_tool_results_go_first_in_the_user_message():
+    results = Message(
+        role="user",
+        content=[TextBlock(text="Continue."), ToolResult(call_id="toolu_01A", content="ok")],
+    )
+    request = Request(model="m", messages=[results])
+    sent = to_anthropic_params(request)["messages"][0]["content"]
+    assert sent == [
+        {"type": "tool_result", "tool_use_id": "toolu_01A", "content": "ok", "is_error": False},
+        {"type": "text", "text": "Continue."},
+    ]
+
+
+def test_reasoning_from_another_provider_is_skipped():
+    foreign = Reasoning(provider="openai", data={"type": "reasoning", "id": "rs_1"})
+    assistant = Message(role="assistant", content=[foreign, TextBlock(text="Done.")])
+    request = Request(model="m", messages=[Message.user("hi"), assistant])
+    sent = to_anthropic_params(request)["messages"][1]["content"]
+    assert sent == [{"type": "text", "text": "Done."}]
