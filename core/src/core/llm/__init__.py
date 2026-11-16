@@ -7,6 +7,7 @@ from core.llm.records import CallRecord, Provider, Usage
 from core.llm.types import (
     ContentBlock,
     Message,
+    Reasoning,
     Request,
     Response,
     Role,
@@ -14,6 +15,9 @@ from core.llm.types import (
     StreamEvent,
     TextBlock,
     TextDelta,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
 )
 
 __all__ = [
@@ -28,6 +32,7 @@ __all__ = [
     "PriceTable",
     "Provider",
     "ProviderAdapter",
+    "Reasoning",
     "Request",
     "Response",
     "RetryPolicy",
@@ -36,6 +41,9 @@ __all__ = [
     "StreamEvent",
     "TextBlock",
     "TextDelta",
+    "ToolCall",
+    "ToolResult",
+    "ToolSpec",
     "Usage",
     "read_records",
 ]

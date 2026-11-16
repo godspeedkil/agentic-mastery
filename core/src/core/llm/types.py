@@ -4,9 +4,9 @@ Application code builds a Request and receives a Response; provider adapters tra
 between these types and each SDK's own format.
 """
 
-from typing import Literal, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
 from core.llm.records import Usage
 
@@ -23,8 +23,64 @@ class TextBlock(BaseModel):
     text: str
 
 
-ContentBlock = TextBlock
-"""Becomes a union of block types when tool calls arrive in Phase 2."""
+class ToolCall(BaseModel):
+    """The model asking to run a tool. Appears in assistant messages."""
+
+    model_config = ConfigDict(frozen=True, use_attribute_docstrings=True)
+
+    type: Literal["tool_call"] = "tool_call"
+    id: str
+    """Provider-assigned; the matching ToolResult must carry it."""
+    name: str
+    arguments: str
+    """The arguments as a JSON string, exactly as the model wrote them."""
+
+
+class ToolResult(BaseModel):
+    """What running a tool produced. Appears in user messages."""
+
+    model_config = ConfigDict(frozen=True, use_attribute_docstrings=True)
+
+    type: Literal["tool_result"] = "tool_result"
+    call_id: str
+    """The `id` of the ToolCall this answers."""
+    content: str
+    is_error: bool = False
+    """True when the tool failed; `content` then explains why, for the model to read."""
+
+
+class Reasoning(BaseModel):
+    """Reasoning returned by a provider, kept so it can be sent back unchanged."""
+
+    model_config = ConfigDict(frozen=True, use_attribute_docstrings=True)
+
+    type: Literal["reasoning"] = "reasoning"
+    provider: str
+    """Only this provider's adapter can send it back; others skip it."""
+    data: dict[str, Any]
+    """The provider's block or item, exactly as received."""
+
+
+ContentBlock = Annotated[TextBlock | ToolCall | ToolResult | Reasoning, Field(discriminator="type")]
+
+ROLE_BLOCKS: dict[Role, set[str]] = {
+    "user": {"text", "tool_result"},
+    "assistant": {"text", "tool_call", "reasoning"},
+}
+"""Which block types each role may carry."""
+
+
+class ToolSpec(BaseModel):
+    """A tool the model may call: its name, what it does, and the arguments it takes."""
+
+    model_config = ConfigDict(frozen=True, use_attribute_docstrings=True)
+
+    name: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    """Letters, digits, `_` and `-`, at most 64: a name both providers accept."""
+    description: str
+    """When and how to use the tool. The model reads it to decide."""
+    input_type: type[BaseModel]
+    """The arguments as a Pydantic model; its JSON Schema is sent to the provider."""
 
 
 class Message(BaseModel):
@@ -32,6 +88,14 @@ class Message(BaseModel):
 
     role: Role
     content: list[ContentBlock] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _blocks_fit_role(self) -> Self:
+        allowed = ROLE_BLOCKS[self.role]
+        for block in self.content:
+            if block.type not in allowed:
+                raise ValueError(f"a {self.role} message cannot contain {block.type!r} blocks")
+        return self
 
     @classmethod
     def user(cls, text: str) -> Self:
@@ -55,6 +119,8 @@ class Request(BaseModel):
     stop_sequences: list[str] = Field(default_factory=list)
     output_type: type[BaseModel] | None = None
     """When set, the provider constrains the answer to this model's JSON Schema."""
+    tools: list[ToolSpec] = Field(default_factory=list)
+    """Tools the model may call; empty means a plain completion."""
 
 
 class Response(BaseModel):
@@ -72,6 +138,11 @@ class Response(BaseModel):
     def text(self) -> str:
         """All text blocks joined; empty if there are none."""
         return "".join(block.text for block in self.content if isinstance(block, TextBlock))
+
+    @property
+    def tool_calls(self) -> list[ToolCall]:
+        """The tools the model asked to run, in order; empty if it answered directly."""
+        return [block for block in self.content if isinstance(block, ToolCall)]
 
 
 class TextDelta(BaseModel):
