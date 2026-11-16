@@ -9,7 +9,17 @@ import pytest
 from openai.types.responses import Response as OpenAIResponse
 from pydantic import BaseModel
 
-from core.llm import Message, Request, Response, TextDelta
+from core.llm import (
+    Message,
+    Reasoning,
+    Request,
+    Response,
+    TextBlock,
+    TextDelta,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+)
 from core.llm import openai_provider as provider_module
 from core.llm.errors import ProviderUnavailableError, RateLimitedError
 from core.llm.openai_provider import OpenAIProvider, from_openai_response, to_openai_params
@@ -41,11 +51,14 @@ def test_stop_sequences_are_rejected():
         to_openai_params(request)
 
 
-def test_response_keeps_text_and_skips_reasoning():
+def test_response_keeps_text_and_reasoning():
     response = from_openai_response(load_response("response_with_reasoning.json"))
     assert response.text == "The capital of France is Paris."
     assert response.stop_reason == "end_turn"
     assert response.raw_stop_reason == "completed"
+    assert response.content[0] == Reasoning(
+        provider="openai", data={"type": "reasoning", "id": "rs_01", "summary": []}
+    )
 
 
 def test_usage_splits_cached_tokens_out_of_input():
@@ -94,15 +107,14 @@ def test_refusal_content_sets_stop_reason():
 
 
 def test_unsupported_output_item_raises():
-    call = {
-        "type": "function_call",
-        "id": "fc_1",
-        "call_id": "call_1",
-        "name": "search",
-        "arguments": "{}",
+    search = {
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed",
+        "action": {"type": "search", "query": "invoices"},
     }
-    with pytest.raises(ValueError, match="function_call"):
-        from_openai_response(load_response("response_with_reasoning.json", output=[call]))
+    with pytest.raises(ValueError, match="web_search_call"):
+        from_openai_response(load_response("response_with_reasoning.json", output=[search]))
 
 
 def test_complete_sends_params_and_parses_reply():
@@ -202,3 +214,78 @@ def test_output_type_sends_a_strict_json_schema():
 
 def test_no_output_type_sends_no_schema():
     assert "text" not in to_openai_params(REQUEST_HI)
+
+
+class LookupVendor(BaseModel):
+    vendor_id: str
+
+
+LOOKUP = ToolSpec(name="lookup_vendor", description="Find a vendor.", input_type=LookupVendor)
+
+
+def test_tools_are_sent_as_strict_functions_with_reasoning_requested():
+    params = to_openai_params(Request(model="m", messages=[Message.user("hi")], tools=[LOOKUP]))
+    [tool] = params["tools"]
+    assert tool["type"] == "function"
+    assert tool["name"] == "lookup_vendor"
+    assert tool["parameters"]["properties"]["vendor_id"]["type"] == "string"
+    assert tool["strict"] is True
+    assert params["include"] == ["reasoning.encrypted_content"]
+
+
+def test_function_call_becomes_a_tool_call_and_sets_tool_use():
+    response = from_openai_response(load_response("response_with_tool_call.json"))
+    assert response.stop_reason == "tool_use"
+    assert response.tool_calls == [
+        ToolCall(id="call_01A", name="lookup_vendor", arguments='{"vendor_id": "V-1"}')
+    ]
+
+
+def test_reasoning_and_calls_go_back_in_order_with_results():
+    response = from_openai_response(load_response("response_with_tool_call.json"))
+    assistant = Message(role="assistant", content=response.content)
+    results = Message(role="user", content=[ToolResult(call_id="call_01A", content="Acme Ltd")])
+    request = Request(model="m", messages=[Message.user("Check V-1."), assistant, results])
+    assert to_openai_params(request)["input"] == [
+        {"role": "user", "content": "Check V-1."},
+        {
+            "type": "reasoning",
+            "id": "rs_02",
+            "summary": [],
+            "encrypted_content": "gAAAAABexample...",
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_01A",
+            "name": "lookup_vendor",
+            "arguments": '{"vendor_id": "V-1"}',
+        },
+        {"type": "function_call_output", "call_id": "call_01A", "output": "Acme Ltd"},
+    ]
+
+
+def test_text_around_items_is_split_into_message_items():
+    call = ToolCall(id="call_1", name="lookup_vendor", arguments="{}")
+    assistant = Message(
+        role="assistant",
+        content=[
+            TextBlock(text="Checking "),
+            TextBlock(text="now."),
+            call,
+            TextBlock(text="Done."),
+        ],
+    )
+    items = to_openai_params(Request(model="m", messages=[assistant]))["input"]
+    assert [item.get("type", item.get("role")) for item in items] == [
+        "assistant",
+        "function_call",
+        "assistant",
+    ]
+    assert items[0]["content"] == "Checking now."
+
+
+def test_reasoning_from_another_provider_is_skipped():
+    foreign = Reasoning(provider="anthropic", data={"type": "thinking", "thinking": "..."})
+    assistant = Message(role="assistant", content=[foreign, TextBlock(text="Done.")])
+    items = to_openai_params(Request(model="m", messages=[assistant]))["input"]
+    assert items == [{"role": "assistant", "content": "Done."}]

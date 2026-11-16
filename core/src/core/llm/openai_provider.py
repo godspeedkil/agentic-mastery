@@ -11,7 +11,20 @@ from openai.types.responses import ResponseUsage as OpenAIUsage
 
 from core.llm.errors import ProviderUnavailableError, translate_sdk_errors
 from core.llm.records import Usage
-from core.llm.types import Request, Response, StopReason, StreamEvent, TextBlock, TextDelta
+from core.llm.types import (
+    ContentBlock,
+    Message,
+    Reasoning,
+    Request,
+    Response,
+    StopReason,
+    StreamEvent,
+    TextBlock,
+    TextDelta,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+)
 from core.settings import get_settings
 
 FINAL_EVENTS = {"response.completed", "response.incomplete", "response.failed"}
@@ -24,6 +37,66 @@ INCOMPLETE_REASONS: dict[str, StopReason] = {
 """Why a response ended with status "incomplete"; anything else becomes "other"."""
 
 
+REASONING_FIELDS = {"type", "id", "summary", "encrypted_content"}
+"""The parts of a reasoning item the API accepts back as input."""
+
+
+def to_openai_items(message: Message) -> list[dict[str, Any]]:
+    """One message as Responses input items, in order.
+
+    Text becomes a message item; tool calls, tool results, and reasoning are items of their
+    own. Consecutive text blocks share one message item.
+    """
+    items: list[dict[str, Any]] = []
+    text: list[str] = []
+
+    def flush_text() -> None:
+        if text:
+            items.append({"role": message.role, "content": "".join(text)})
+            text.clear()
+
+    for block in message.content:
+        if isinstance(block, TextBlock):
+            text.append(block.text)
+            continue
+        flush_text()
+        match block:
+            case ToolCall():
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": block.id,
+                        "name": block.name,
+                        "arguments": block.arguments,
+                    }
+                )
+            case ToolResult():
+                # No error flag on this API: the content itself must say the tool failed.
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": block.call_id,
+                        "output": block.content,
+                    }
+                )
+            case Reasoning() if block.provider == "openai":
+                items.append(block.data)
+            case Reasoning():
+                pass  # another provider's reasoning means nothing here
+    flush_text()
+    return items
+
+
+def to_openai_tool(spec: ToolSpec) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": spec.name,
+        "description": spec.description,
+        "parameters": to_strict_json_schema(spec.input_type),
+        "strict": True,
+    }
+
+
 def to_openai_params(request: Request) -> dict[str, Any]:
     """Build keyword arguments for `client.responses.create`."""
     if request.stop_sequences:
@@ -31,10 +104,7 @@ def to_openai_params(request: Request) -> dict[str, Any]:
     params: dict[str, Any] = {
         "model": request.model,
         "max_output_tokens": request.max_tokens,
-        "input": [
-            {"role": message.role, "content": "".join(block.text for block in message.content)}
-            for message in request.messages
-        ],
+        "input": [item for message in request.messages for item in to_openai_items(message)],
         "store": False,
     }
     if request.system is not None:
@@ -48,6 +118,10 @@ def to_openai_params(request: Request) -> dict[str, Any]:
                 "strict": True,
             }
         }
+    if request.tools:
+        params["tools"] = [to_openai_tool(spec) for spec in request.tools]
+        # Without storage, reasoning survives between calls only if we carry it ourselves.
+        params["include"] = ["reasoning.encrypted_content"]
     return params
 
 
@@ -65,7 +139,7 @@ def to_usage(usage: OpenAIUsage) -> Usage:
     )
 
 
-def stop_reason_of(response: OpenAIResponse, refused: bool) -> tuple[StopReason, str]:
+def stop_reason_of(response: OpenAIResponse, refused: bool, called: bool) -> tuple[StopReason, str]:
     """Normalized stop reason plus a raw description, from status and incomplete details."""
     if response.status == "incomplete":
         reason = response.incomplete_details.reason if response.incomplete_details else None
@@ -73,14 +147,21 @@ def stop_reason_of(response: OpenAIResponse, refused: bool) -> tuple[StopReason,
     raw = response.status or "unknown"
     if response.status != "completed":
         return "other", raw
-    return ("refusal" if refused else "end_turn"), raw
+    if refused:
+        return "refusal", raw
+    return ("tool_use" if called else "end_turn"), raw
 
 
 def from_openai_response(response: OpenAIResponse) -> Response:
-    content = []
+    content: list[ContentBlock] = []
     refused = False
     for item in response.output:
         if item.type == "reasoning":
+            data = item.model_dump(include=REASONING_FIELDS, exclude_none=True)
+            content.append(Reasoning(provider="openai", data=data))
+            continue
+        if item.type == "function_call":
+            content.append(ToolCall(id=item.call_id, name=item.name, arguments=item.arguments))
             continue
         if item.type != "message":
             raise ValueError(f"unsupported OpenAI output item: {item.type!r}")
@@ -93,7 +174,8 @@ def from_openai_response(response: OpenAIResponse) -> Response:
 
     if response.usage is None:
         raise ValueError("OpenAI response has no usage")
-    stop_reason, raw = stop_reason_of(response, refused)
+    called = any(isinstance(block, ToolCall) for block in content)
+    stop_reason, raw = stop_reason_of(response, refused, called)
     return Response(
         model=response.model,
         content=content,
