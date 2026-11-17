@@ -215,3 +215,80 @@ answer, it needs a defined shape. Two ways:
   `submit_decision`. Calling it ends the loop. "Done" becomes an explicit action whose
   arguments are validated like any other call, so a malformed answer goes back to the model
   as an error result instead of ending the run.
+
+### In the code
+
+The loop lives in `core/src/core/agent.py`. A `Tool` pairs the `ToolSpec` the model sees with
+the Python function that carries it out. `A` is the tool's argument class, so the function
+receives arguments that have already been validated:
+
+```python
+@dataclass(frozen=True)
+class Tool[A: BaseModel]:
+    spec: ToolSpec
+    run: Callable[[A], str]
+```
+
+`run_tool` handles one call. Each of its three steps either moves on or returns an error
+result, a `ToolResult` with `is_error` set. `error_result` builds one, and every message
+starts with `Error:` because OpenAI has no error flag (2.1):
+
+```python
+def run_tool(call: ToolCall, tools: Mapping[str, Tool]) -> ToolResult:
+    tool = tools.get(call.name)
+    if tool is None:
+        available = ", ".join(sorted(tools))
+        return error_result(call, f"Error: unknown tool {call.name!r}. Available: {available}.")
+    try:
+        arguments = tool.spec.input_type.model_validate_json(call.arguments)
+    except ValidationError as exc:
+        return error_result(call, f"Error: invalid arguments for {call.name}.\n{exc}")
+    try:
+        return ToolResult(call_id=call.id, content=tool.run(arguments))
+    except Exception as exc:  # any failure inside a tool is reported, never raised
+        return error_result(call, f"Error: {call.name} failed: {type(exc).__name__}: {exc}")
+```
+
+`run_agent` is the loop. `client.complete` is the Phase 1 client's call, so every step is
+retried, priced, and recorded like any other call; it returns a `Completion`, the response
+plus its record. `run` is an `AgentRun`, which collects the history in `run.messages`;
+`specs` are the tools' specs, and `by_name` maps each tool's name to the tool. Each call's
+record is labeled with the caller's `labels` plus its step number:
+
+```python
+while True:
+    step += 1
+    step_request = request.model_copy(update={"messages": list(run.messages), "tools": specs})
+    completion = client.complete(
+        provider, step_request, labels={**(labels or {}), "step": str(step)}
+    )
+    response = completion.response
+    if response.content:
+        run.messages.append(Message(role="assistant", content=response.content))
+    if not response.tool_calls:
+        return run
+    results = []
+    for call in response.tool_calls:
+        ...  # the answer tool, below
+        results.append(run_tool(call, by_name))
+    run.messages.append(Message(role="user", content=results))
+```
+
+The whole response goes into the history, so reasoning and calls go back to the model on the
+next step. The history is only ever appended to, so each request extends the one before,
+which is what prompt caching needs. `list(run.messages)` gives each request its own copy, so
+later steps can't change a request that was already sent.
+
+The answer tool is a `ToolSpec` passed as `answer` and offered with the others. Inside the
+`for` loop, a call to it is handled before `run_tool`: valid arguments end the run with the
+answer, and invalid ones go back as an error result:
+
+```python
+if answer is not None and call.name == answer.name:
+    try:
+        run.answer = answer.input_type.model_validate_json(call.arguments)
+        return run
+    except ValidationError as exc:
+        results.append(error_result(call, f"Error: invalid answer.\n{exc}"))
+        continue
+```
