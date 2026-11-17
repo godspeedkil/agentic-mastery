@@ -437,3 +437,59 @@ def stop(reason: AgentStopReason) -> AgentRun:
 The note follows the latest tool results, so the history has two user turns in a row.
 Anthropic combines consecutive turns of the same role into one, and OpenAI's input is a flat
 list of items, so both accept it.
+
+## 2.4 Tool design
+
+A tool is an interface for a model, not for a programmer. A programmer reads the docs once and
+handles edge cases in code; a model reads the definition on every call and decides from that
+alone. The design rules follow from that difference
+([Anthropic, 2025](https://www.anthropic.com/engineering/writing-tools-for-agents)).
+
+### Choose tools for the task
+
+Give the agent the few tools a person doing the job would want, not one tool per API endpoint.
+`find_vendor(name)` beats `list_vendors()`: the agent has a name from the invoice, and a full
+list would cost tokens on every later step and leave the search to the model. Fewer, more
+capable tools also mean fewer wrong choices between overlapping ones.
+
+### Names and descriptions
+
+- **Names** say what the tool does with a clear verb, and related tools share a prefix or
+  pattern so they read as a group: `find_vendor`, `get_purchase_order`, `find_invoices`.
+- **Descriptions** are written like a note to a new colleague: what the tool does, when to use
+  it rather than another, what the inputs look like, and what comes back. Each argument gets
+  its own description in the schema, with its format.
+
+Both are part of the prompt. A vague description causes wrong calls as reliably as a vague
+system prompt causes wrong answers (1.4).
+
+### Inputs that are hard to get wrong
+
+- **Unambiguous argument names.** `vendor_id`, not `id`; `po_number`, not `number`.
+- **Closed sets as enums**, so an invalid status can't be expressed (1.5).
+- **Forgiving formats.** Accept `PO-1042`, `po-1042`, and `1042` if they all mean the same
+  thing: normalizing in code is cheaper than an error and a retry.
+
+### Outputs that are worth their tokens
+
+A tool result goes into the history and is resent on every later step (2.2), so each token in
+it is paid for many times.
+
+- **Return what the task needs**: names alongside IDs, so the model doesn't need a second call
+  to learn what an ID refers to; no internal fields the model can't use.
+- **Bound the size.** Cap list results, and say when results were cut off and how to narrow
+  the search.
+- **Use a format the model reads easily.** Compact JSON or short labeled text both work; what
+  matters is that it is consistent across tools.
+
+### Errors that say what to do next
+
+An error result is read by the model, so it should help it recover (2.1): say what was wrong
+and what would work. "No purchase order PO-1O42. PO numbers are PO- followed by digits." leads
+to a corrected call; "Not found" leads to guessing.
+
+### Tools are tested like prompts
+
+Tool definitions are prompts, and they change behavior the same way: test them on real tasks
+and read the transcripts. Wrong tool choices, repeated calls, and arguments in the wrong format
+usually trace back to a name, a description, or an error message.
