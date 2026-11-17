@@ -1,0 +1,218 @@
+[
+  {
+    "number": "PO-1001",
+    "vendor_id": "V-101",
+    "status": "open",
+    "currency": "USD",
+    "amount": 12000.0,
+    "description": "Network switches and cabling"
+  },
+  {
+    "number": "PO-1002",
+    "vendor_id": "V-101",
+    "status": "closed",
+    "currency": "USD",
+    "amount": 4500.0,
+    "description": "Wireless access points"
+  },
+  {
+    "number": "PO-1003",
+    "vendor_id": "V-102",
+    "status": "open",
+    "currency": "USD",
+    "amount": 8200.0,
+    "description": "Freight, Q4 inbound shipments"
+  },
+  {
+    "number": "PO-1004",
+    "vendor_id": "V-103",
+    "status": "open",
+    "currency": "EUR",
+    "amount": 15000.0,
+    "description": "Analytics platform licenses, 2027"
+  },
+  {
+    "number": "PO-1005",
+    "vendor_id": "V-103",
+    "status": "open",
+    "currency": "EUR",
+    "amount": 2400.0,
+    "description": "Premium support plan"
+  },
+  {
+    "number": "PO-1006",
+    "vendor_id": "V-104",
+    "status": "open",
+    "currency": "USD",
+    "amount": 1250.0,
+    "description": "Office consumables, November"
+  },
+  {
+    "number": "PO-1007",
+    "vendor_id": "V-104",
+    "status": "closed",
+    "currency": "USD",
+    "amount": 900.0,
+    "description": "Office consumables, September"
+  },
+  {
+    "number": "PO-1008",
+    "vendor_id": "V-105",
+    "status": "open",
+    "currency": "USD",
+    "amount": 6780.0,
+    "description": "Workshop tools and parts"
+  },
+  {
+    "number": "PO-1009",
+    "vendor_id": "V-106",
+    "status": "open",
+    "currency": "CAD",
+    "amount": 22000.0,
+    "description": "Process review engagement"
+  },
+  {
+    "number": "PO-1010",
+    "vendor_id": "V-107",
+    "status": "open",
+    "currency": "GBP",
+    "amount": 3150.0,
+    "description": "Catering, all-hands offsite"
+  },
+  {
+    "number": "PO-1011",
+    "vendor_id": "V-108",
+    "status": "open",
+    "currency": "JPY",
+    "amount": 1850000,
+    "description": "Sensor modules, batch 7"
+  },
+  {
+    "number": "PO-1012",
+    "vendor_id": "V-109",
+    "status": "open",
+    "currency": "USD",
+    "amount": 5600.0,
+    "description": "Team travel, sales kickoff"
+  },
+  {
+    "number": "PO-1013",
+    "vendor_id": "V-110",
+    "status": "open",
+    "currency": "USD",
+    "amount": 9999.0,
+    "description": "Cloud hosting, annual reserve"
+  },
+  {
+    "number": "PO-1014",
+    "vendor_id": "V-110",
+    "status": "open",
+    "currency": "USD",
+    "amount": 2000.0,
+    "description": "Managed backups"
+  },
+  {
+    "number": "PO-1015",
+    "vendor_id": "V-111",
+    "status": "open",
+    "currency": "USD",
+    "amount": 1480.0,
+    "description": "Printed brochures"
+  },
+  {
+    "number": "PO-1016",
+    "vendor_id": "V-112",
+    "status": "open",
+    "currency": "USD",
+    "amount": 18500.0,
+    "description": "Facilities maintenance, Q4"
+  },
+  {
+    "number": "PO-1017",
+    "vendor_id": "V-112",
+    "status": "closed",
+    "currency": "USD",
+    "amount": 7200.0,
+    "description": "HVAC repair"
+  },
+  {
+    "number": "PO-1018",
+    "vendor_id": "V-105",
+    "status": "open",
+    "currency": "USD",
+    "amount": 450.0,
+    "description": "Replacement drill bits"
+  },
+  {
+    "number": "PO-1019",
+    "vendor_id": "V-102",
+    "status": "open",
+    "currency": "USD",
+    "amount": 3375.5,
+    "description": "Courier services, October"
+  },
+  {
+    "number": "PO-1020",
+    "vendor_id": "V-101",
+    "status": "open",
+    "currency": "USD",
+    "amount": 980.0,
+    "description": "Patch panels"
+  },
+  {
+    "number": "PO-1021",
+    "vendor_id": "V-107",
+    "status": "closed",
+    "currency": "GBP",
+    "amount": 1200.0,
+    "description": "Catering, board meeting"
+  },
+  {
+    "number": "PO-1022",
+    "vendor_id": "V-108",
+    "status": "open",
+    "currency": "JPY",
+    "amount": 420000,
+    "description": "Connector samples"
+  },
+  {
+    "number": "PO-1023",
+    "vendor_id": "V-106",
+    "status": "open",
+    "currency": "CAD",
+    "amount": 5000.0,
+    "description": "Workshop facilitation"
+  },
+  {
+    "number": "PO-1024",
+    "vendor_id": "V-104",
+    "status": "open",
+    "currency": "USD",
+    "amount": 3600.0,
+    "description": "Ergonomic chairs"
+  },
+  {
+    "number": "PO-1025",
+    "vendor_id": "V-110",
+    "status": "open",
+    "currency": "USD",
+    "amount": 14250.0,
+    "description": "GPU compute credits"
+  },
+  {
+    "number": "PO-1042",
+    "vendor_id": "V-105",
+    "status": "open",
+    "currency": "USD",
+    "amount": 2310.0,
+    "description": "Bench grinders"
+  },
+  {
+    "number": "PO-1100",
+    "vendor_id": "V-103",
+    "status": "open",
+    "currency": "USD",
+    "amount": 4000.0,
+    "description": "Implementation services"
+  }
+]

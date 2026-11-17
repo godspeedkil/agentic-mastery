@@ -1,0 +1,74 @@
+[
+  {
+    "id": "V-101",
+    "name": "Acme Ltd",
+    "status": "active",
+    "currency": "USD"
+  },
+  {
+    "id": "V-102",
+    "name": "Acme Logistics Inc.",
+    "status": "active",
+    "currency": "USD"
+  },
+  {
+    "id": "V-103",
+    "name": "Brightline Software GmbH",
+    "status": "active",
+    "currency": "EUR"
+  },
+  {
+    "id": "V-104",
+    "name": "Northwind Office Supply",
+    "status": "active",
+    "currency": "USD"
+  },
+  {
+    "id": "V-105",
+    "name": "Kestrel Hardware Co.",
+    "status": "active",
+    "currency": "USD"
+  },
+  {
+    "id": "V-106",
+    "name": "Maple Leaf Consulting",
+    "status": "active",
+    "currency": "CAD"
+  },
+  {
+    "id": "V-107",
+    "name": "Thames Valley Catering Ltd",
+    "status": "active",
+    "currency": "GBP"
+  },
+  {
+    "id": "V-108",
+    "name": "Sakura Components K.K.",
+    "status": "active",
+    "currency": "JPY"
+  },
+  {
+    "id": "V-109",
+    "name": "Pinnacle Travel Services",
+    "status": "blocked",
+    "currency": "USD"
+  },
+  {
+    "id": "V-110",
+    "name": "Orion Cloud Services",
+    "status": "active",
+    "currency": "USD"
+  },
+  {
+    "id": "V-111",
+    "name": "Bluefin Printing LLC",
+    "status": "blocked",
+    "currency": "USD"
+  },
+  {
+    "id": "V-112",
+    "name": "Granite Facilities Management",
+    "status": "active",
+    "currency": "USD"
+  }
+]

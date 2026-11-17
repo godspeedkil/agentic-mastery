@@ -1,0 +1,107 @@
+[
+  {
+    "vendor_id": "V-101",
+    "invoice_number": "INV-0042",
+    "total": 1180.0,
+    "currency": "USD",
+    "paid_on": "2026-09-14"
+  },
+  {
+    "vendor_id": "V-101",
+    "invoice_number": "INV-0037",
+    "total": 2240.0,
+    "currency": "USD",
+    "paid_on": "2026-08-02"
+  },
+  {
+    "vendor_id": "V-102",
+    "invoice_number": "AL-55120",
+    "total": 1960.0,
+    "currency": "USD",
+    "paid_on": "2026-09-30"
+  },
+  {
+    "vendor_id": "V-103",
+    "invoice_number": "BL-2026-0298",
+    "total": 2400.0,
+    "currency": "EUR",
+    "paid_on": "2026-08-21"
+  },
+  {
+    "vendor_id": "V-103",
+    "invoice_number": "BL-2026-0311",
+    "total": 1250.0,
+    "currency": "EUR",
+    "paid_on": "2026-09-19"
+  },
+  {
+    "vendor_id": "V-104",
+    "invoice_number": "55790",
+    "total": 412.75,
+    "currency": "USD",
+    "paid_on": "2026-08-11"
+  },
+  {
+    "vendor_id": "V-104",
+    "invoice_number": "55871",
+    "total": 618.2,
+    "currency": "USD",
+    "paid_on": "2026-10-03"
+  },
+  {
+    "vendor_id": "V-105",
+    "invoice_number": "KH-3321",
+    "total": 512.0,
+    "currency": "USD",
+    "paid_on": "2026-10-09"
+  },
+  {
+    "vendor_id": "V-106",
+    "invoice_number": "MLC-2026-09",
+    "total": 4800.0,
+    "currency": "CAD",
+    "paid_on": "2026-10-01"
+  },
+  {
+    "vendor_id": "V-107",
+    "invoice_number": "TVC-118",
+    "total": 1195.0,
+    "currency": "GBP",
+    "paid_on": "2026-09-05"
+  },
+  {
+    "vendor_id": "V-108",
+    "invoice_number": "SK-0450",
+    "total": 380000,
+    "currency": "JPY",
+    "paid_on": "2026-09-26"
+  },
+  {
+    "vendor_id": "V-110",
+    "invoice_number": "OC-7702",
+    "total": 1890.0,
+    "currency": "USD",
+    "paid_on": "2026-08-29"
+  },
+  {
+    "vendor_id": "V-110",
+    "invoice_number": "OC-7781",
+    "total": 1500.0,
+    "currency": "USD",
+    "paid_on": "2026-10-15"
+  },
+  {
+    "vendor_id": "V-112",
+    "invoice_number": "GFM-0899",
+    "total": 6100.0,
+    "currency": "USD",
+    "paid_on": "2026-09-08"
+  },
+  {
+    "vendor_id": "V-112",
+    "invoice_number": "GFM-0907",
+    "total": 2750.0,
+    "currency": "USD",
+    "paid_on": "2026-10-12"
+  }
+]
