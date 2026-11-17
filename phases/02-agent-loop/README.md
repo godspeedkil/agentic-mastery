@@ -55,9 +55,27 @@ shape and each adapter translates.
 
 ### In the code
 
-A tool is described by a `ToolSpec`. Its arguments are a Pydantic model, as the answer's shape
-is with `output_type` (1.5): one class gives the schema sent to the model and later validates
-what comes back (`core/src/core/llm/types.py`):
+This section follows one tool call through the client: the tool is described, sent, called
+by the model, answered, and the model's reasoning is carried along to the next request.
+
+```mermaid
+sequenceDiagram
+    participant C as Your code
+    participant A as Provider adapter
+    participant P as Provider API
+    C->>A: Request with tools (ToolSpec)
+    A->>P: tool definitions with strict JSON Schema
+    P-->>A: reasoning + tool call
+    A-->>C: Response with Reasoning and ToolCall blocks
+    Note over C: run the tool
+    C->>A: next Request: history + ToolResult
+    A->>P: reasoning sent back, then the call and its result
+```
+
+**1. Describe the tool.** A `ToolSpec` names the tool, says what it does, and gives its
+arguments as a Pydantic model, as the answer's shape is with `output_type` (1.5): one class
+gives the schema sent to the model and later validates what comes back
+(`core/src/core/llm/types.py`):
 
 ```python
 class ToolSpec(BaseModel):
@@ -66,7 +84,8 @@ class ToolSpec(BaseModel):
     input_type: type[BaseModel]
 ```
 
-`Request`, the client's description of one call, carries them in its `tools` field:
+**2. Send it.** `Request`, the client's description of one call, carries the specs in its
+`tools` field:
 
 ```python
 tools: list[ToolSpec] = Field(default_factory=list)
@@ -88,35 +107,15 @@ def to_openai_tool(spec: ToolSpec) -> dict[str, Any]:
     }
 ```
 
-The model's request and your answer are two more kinds of content block, the pieces a
-message is made of:
+**3. Read the call.** The adapter turns the provider's call into a `ToolCall`, one kind of
+content block, the pieces a message is made of. Arguments stay a JSON string because OpenAI
+sends one; the Anthropic adapter serializes its object to match:
 
 ```python
 class ToolCall(BaseModel):
     id: str
     name: str
     arguments: str  # JSON, exactly as the model wrote it
-
-
-class ToolResult(BaseModel):
-    call_id: str  # the ToolCall's id
-    content: str
-    is_error: bool = False
-```
-
-Arguments stay a JSON string because OpenAI sends one, and the Anthropic adapter serializes
-its object to match. Either way they are validated like structured output, where `spec` is
-the called tool's `ToolSpec` and `call` the `ToolCall`:
-`spec.input_type.model_validate_json(call.arguments)`.
-
-A message refuses blocks its role can't carry, so a result put in the wrong turn fails when
-the message is built, not at the provider:
-
-```python
-ROLE_BLOCKS: dict[Role, set[str]] = {
-    "user": {"text", "tool_result"},
-    "assistant": {"text", "tool_call", "reasoning"},
-}
 ```
 
 `Response`, the normalized reply, lists the calls the model made:
@@ -127,16 +126,40 @@ def tool_calls(self) -> list[ToolCall]:
     return [block for block in self.content if isinstance(block, ToolCall)]
 ```
 
-OpenAI reports a response that requests calls as plain `completed`, so its adapter derives
-the `tool_use` stop reason itself, matching Anthropic's. `called` is true when the output
+Its stop reason is `tool_use` on both providers. OpenAI reports such a response as plain
+`completed`, so its adapter derives the reason itself; `called` is true when the output
 contains a function call, and `raw` is the provider's own status, kept for debugging:
 
 ```python
 return ("tool_use" if called else "end_turn"), raw
 ```
 
-Reasoning is a third kind of block, holding the provider's data untouched so it can be sent
-back as received. Each adapter sends back only its own provider's reasoning:
+**4. Answer it.** Before running the tool, its arguments are validated like structured
+output, where `spec` is the called tool's `ToolSpec` and `call` the `ToolCall`:
+`spec.input_type.model_validate_json(call.arguments)`. The outcome goes back as a
+`ToolResult`, linked to the call by its ID:
+
+```python
+class ToolResult(BaseModel):
+    call_id: str  # the ToolCall's id
+    content: str
+    is_error: bool = False
+```
+
+Calls come from the assistant and results from the user. A message refuses blocks its role
+can't carry, so a result put in the wrong turn fails when the message is built, not at the
+provider:
+
+```python
+ROLE_BLOCKS: dict[Role, set[str]] = {
+    "user": {"text", "tool_result"},
+    "assistant": {"text", "tool_call", "reasoning"},
+}
+```
+
+**5. Carry the reasoning.** The reasoning that produced the call is kept as a third kind of
+block, holding the provider's data untouched, and goes back in the next request ahead of the
+call. Each adapter sends back only its own provider's reasoning:
 
 ```python
 class Reasoning(BaseModel):
@@ -144,8 +167,8 @@ class Reasoning(BaseModel):
     data: dict[str, Any]
 ```
 
-For OpenAI, which keeps nothing between calls when `store` is false, the encrypted reasoning
-has to be requested whenever tools are sent:
+OpenAI keeps nothing between calls when `store` is false, so its encrypted reasoning has to
+be requested whenever tools are sent:
 
 ```python
 params["include"] = ["reasoning.encrypted_content"]
@@ -228,9 +251,28 @@ answer, it needs a defined shape. Two ways:
 
 ### In the code
 
-The loop lives in `core/src/core/agent.py`. A `Tool` pairs the `ToolSpec` the model sees with
-the Python function that carries it out. `A` is the tool's argument class, so the function
-receives arguments that have already been validated:
+The loop is `run_agent` in `core/src/core/agent.py`. Each pass through it makes one model call
+and runs the tools that call asked for:
+
+```mermaid
+flowchart TD
+    S([run_agent]) --> M["step: call the model with the history and the tools"]
+    M --> H[append the response to the history]
+    H --> Q{any tool calls?}
+    Q -- no --> E([return the run])
+    Q -- yes --> F{for each call: the answer tool?}
+    F -- "yes, valid" --> E2([return the run with the answer])
+    F -- "yes, invalid" --> ER[error result]
+    F -- no --> RT["run_tool: find the tool, validate the arguments, run it"]
+    RT --> RS[result or error result]
+    ER --> B[append all results as one user turn]
+    RS --> B
+    B --> M
+```
+
+**The pieces.** A `Tool` pairs the `ToolSpec` the model sees with the Python function that
+carries it out. `A` is the tool's argument class, so the function receives arguments that
+have already been validated:
 
 ```python
 @dataclass(frozen=True)
@@ -239,9 +281,59 @@ class Tool[A: BaseModel]:
     run: Callable[[A], str]
 ```
 
-`run_tool` handles one call. Each of its three steps either moves on or returns an error
-result, a `ToolResult` with `is_error` set. `error_result` builds one, and every message
-starts with `Error:` because OpenAI has no error flag (2.1):
+A run's state is an `AgentRun`: the history in `run.messages`, and one `Completion` per model
+call in `run.completions`. A `Completion` is what the Phase 1 client returns: the response
+plus the record of the call.
+
+**One step.** `step` sends the history so far with the tools on offer and appends the whole
+response, so reasoning and calls go back to the model next time. `client.complete` is the
+Phase 1 client's call, so every step is retried, priced, and recorded like any other call,
+labeled with the caller's `labels` and its step number:
+
+```python
+def step(offered: list[ToolSpec]) -> list[ToolCall]:
+    step_request = request.model_copy(update={"messages": list(run.messages), "tools": offered})
+    completion = client.complete(
+        provider, step_request, labels={**(labels or {}), "step": str(len(run.completions) + 1)}
+    )
+    run.completions.append(completion)
+    response = completion.response
+    if response.content:
+        run.messages.append(Message(role="assistant", content=response.content))
+    return response.tool_calls
+```
+
+The history is only ever appended to, so each request extends the one before, which is what
+prompt caching needs. `list(run.messages)` gives each request its own copy, so later steps
+can't change a request that was already sent.
+
+**The loop.** No tool calls means the model has replied, and the run ends. Otherwise every
+call gets exactly one result, and all of them go back as one user turn. `specs` are the
+tools' specs plus the answer tool's, `by_name` maps each tool's name to the tool, and `stop`
+records why the run ended and returns it. The lines marked for 2.3 are the stop conditions:
+
+```python
+while True:
+    ...  # step and token limits, 2.3
+    calls = step(specs)
+    if not calls:
+        return stop(...)  # "replied", or "provider_stop" for a cut-off reply, 2.3
+    results = []
+    for call in calls:
+        if answer is not None and call.name == answer.name:
+            if (error := take_answer(call)) is None:
+                return stop("answered")
+            results.append(error)
+            continue
+        ...  # count the call for repeat detection, 2.3
+        results.append(run_tool(call, by_name))
+    run.messages.append(Message(role="user", content=results))
+    ...  # repeat and error-streak checks, 2.3
+```
+
+**Running a tool.** `run_tool` handles one call in three steps, and each either moves on or
+returns an error result, a `ToolResult` with `is_error` set. `error_result` builds one, and
+every message starts with `Error:` because OpenAI has no error flag (2.1):
 
 ```python
 def run_tool(call: ToolCall, tools: Mapping[str, Tool]) -> ToolResult:
@@ -259,48 +351,17 @@ def run_tool(call: ToolCall, tools: Mapping[str, Tool]) -> ToolResult:
         return error_result(call, f"Error: {call.name} failed: {type(exc).__name__}: {exc}")
 ```
 
-`run_agent` is the loop. `client.complete` is the Phase 1 client's call, so every step is
-retried, priced, and recorded like any other call; it returns a `Completion`, the response
-plus its record. `run` is an `AgentRun`, which collects the history in `run.messages`;
-`specs` are the tools' specs, and `by_name` maps each tool's name to the tool. Each call's
-record is labeled with the caller's `labels` plus its step number:
+**The answer tool.** `answer` is a `ToolSpec` offered alongside the others. A call to it is
+validated instead of run: `take_answer` stores valid arguments as the run's answer and
+returns `None`, or returns an error result for the model to read:
 
 ```python
-while True:
-    step += 1
-    step_request = request.model_copy(update={"messages": list(run.messages), "tools": specs})
-    completion = client.complete(
-        provider, step_request, labels={**(labels or {}), "step": str(step)}
-    )
-    response = completion.response
-    if response.content:
-        run.messages.append(Message(role="assistant", content=response.content))
-    if not response.tool_calls:
-        return run
-    results = []
-    for call in response.tool_calls:
-        ...  # the answer tool, below
-        results.append(run_tool(call, by_name))
-    run.messages.append(Message(role="user", content=results))
-```
-
-The whole response goes into the history, so reasoning and calls go back to the model on the
-next step. The history is only ever appended to, so each request extends the one before,
-which is what prompt caching needs. `list(run.messages)` gives each request its own copy, so
-later steps can't change a request that was already sent.
-
-The answer tool is a `ToolSpec` passed as `answer` and offered with the others. Inside the
-`for` loop, a call to it is handled before `run_tool`: valid arguments end the run with the
-answer, and invalid ones go back as an error result:
-
-```python
-if answer is not None and call.name == answer.name:
+def take_answer(call: ToolCall) -> ToolResult | None:
     try:
         run.answer = answer.input_type.model_validate_json(call.arguments)
-        return run
     except ValidationError as exc:
-        results.append(error_result(call, f"Error: invalid answer.\n{exc}"))
-        continue
+        return error_result(call, f"Error: invalid answer.\n{exc}")
+    return None
 ```
 
 ### Choices and alternatives
@@ -368,8 +429,33 @@ only lets failures cost more.
 
 ### In the code
 
-Each row of the stop-conditions table is one value of `AgentStopReason`, and every run
-records one in `AgentRun.stop_reason` (`core/src/core/agent.py`):
+The stop conditions sit at three points in the loop from 2.2: before each model call, after
+each response, and after each round of tool results. A cap ends the run through `stop`,
+which first gives the model its graceful last turn:
+
+```mermaid
+flowchart TD
+    T([next step]) --> C1{steps left?}
+    C1 -- no --> X1[max_steps]
+    C1 -- yes --> C2{token budget left?}
+    C2 -- no --> X2[token_budget]
+    C2 -- yes --> M[call the model]
+    M --> C3{any tool calls?}
+    C3 -- no --> X3[replied or provider_stop]
+    C3 -- yes --> C4{valid answer?}
+    C4 -- yes --> X4[answered]
+    C4 -- no --> R[run the tools, append the results]
+    R --> C5{a call repeated too often?}
+    C5 -- yes --> X5[repeated_call]
+    C5 -- no --> C6{too many errors in a row?}
+    C6 -- yes --> X6[error_streak]
+    C6 -- no --> T
+    X1 & X2 & X5 & X6 --> G["graceful last turn: only the answer tool"]
+```
+
+**What a run records.** Each row of the stop-conditions table is one value of
+`AgentStopReason`, and every run ends with one in `AgentRun.stop_reason`
+(`core/src/core/agent.py`):
 
 ```python
 AgentStopReason = Literal[
@@ -395,27 +481,33 @@ class Limits:
     graceful: bool = True
 ```
 
-The loop checks each condition where the table says. `run.completions` holds one entry per
-model call so far, `run.tokens` sums their usage, `step` makes one call and returns the tool
-calls it requested, and `stop` records the reason and returns the run. The caps come before
-the call, so the loop never makes a call it can't afford:
+**Before the call.** The hard caps come first, so the loop never makes a call it can't
+afford. `run.completions` holds one entry per model call so far, and `run.tokens` sums their
+usage:
 
 ```python
-while True:
-    if len(run.completions) >= limits.max_steps:
-        return stop("max_steps")
-    if run.tokens >= limits.max_tokens:
-        return stop("token_budget")
-    calls = step(specs)
-    if not calls:
-        last = run.completions[-1].response
-        return stop("provider_stop" if last.stop_reason in PROVIDER_STOPS else "replied")
+if len(run.completions) >= limits.max_steps:
+    return stop("max_steps")
+if run.tokens >= limits.max_tokens:
+    return stop("token_budget")
 ```
 
-`PROVIDER_STOPS` holds the normalized stop reasons for a cut-off or refused reply (1.2):
-`max_tokens` and `refusal`. The stuck-run checks come after the tools run, because they depend
-on the results. `calls_seen` counts each call by `call_key`, and the error streak resets on
-any success:
+**After the response.** A response with no tool calls ends the run. `PROVIDER_STOPS` holds
+the normalized stop reasons for a cut-off or refused reply (1.2): `max_tokens` and
+`refusal`:
+
+```python
+calls = step(specs)
+if not calls:
+    last = run.completions[-1].response
+    return stop("provider_stop" if last.stop_reason in PROVIDER_STOPS else "replied")
+```
+
+A valid call to the answer tool ends it as `"answered"`, as shown in 2.2.
+
+**After the tools.** The stuck-run checks depend on the results, so they come last.
+`calls_seen` counts every call the loop has run, keyed by `call_key`, and the error streak
+counts error results in a row, resetting on any success:
 
 ```python
 for result in results:
@@ -438,10 +530,11 @@ def call_key(call: ToolCall) -> tuple[str, str]:
     return call.name, arguments
 ```
 
-On a cap, `stop` gives the model its graceful last turn: a message saying why the run is
-ending, then one call that offers only the answer tool. `CAPS` is the set of the four cap
-reasons, and `take_answer` stores a valid answer, returning `None` when it did. The stop
-reason stays the cap's even when that turn produces an answer:
+**How a run ends.** `stop` records the reason first. For a cap, with an answer tool and
+`graceful` on, it then adds a message saying why the run is ending and makes one last call
+that offers only the answer tool. `CAPS` is the set of the four cap reasons, and `step` and
+`take_answer` are the functions from 2.2. The stop reason stays the cap's even when that
+turn produces an answer:
 
 ```python
 def stop(reason: AgentStopReason) -> AgentRun:
