@@ -292,3 +292,55 @@ if answer is not None and call.name == answer.name:
         results.append(error_result(call, f"Error: invalid answer.\n{exc}"))
         continue
 ```
+
+## 2.3 Stopping
+
+### Why loops fail to end
+
+A loop ends on its own when the model answers. When it doesn't, the cause is usually one of:
+
+- **Repetition.** The same call with the same arguments, again and again, often because the
+  result didn't contain what the model hoped for.
+- **Error spirals.** Each fix to a failing call fails in a new way.
+- **Wandering.** Calls that each look reasonable but never converge on an answer.
+- **Running out of room.** The history grows until the output budget or the context window
+  cuts the model off (1.2).
+
+None of these raise an exception: they look like a working agent that costs more every step.
+So the loop needs stop conditions of its own.
+
+### Stop conditions
+
+| Condition | Checked | Means |
+| --- | --- | --- |
+| Answered | after each response | Success: the answer tool was called with valid arguments. |
+| Replied | after each response | The model ended without calling a tool. Success when no answer tool is offered; with one, the answer is missing. |
+| Provider stop | after each response | The response was cut off or refused (`max_tokens`, `refusal`) and requested nothing. |
+| Step limit | before each call | The run used its allowed number of model calls. |
+| Token budget | before each call | The run's total tokens, input and output across all steps, passed its budget. |
+| Repeated call | after running tools | The same tool was called with the same arguments too many times. |
+| Error streak | after running tools | Too many tool results in a row were errors. |
+
+The step limit and token budget are hard caps: they bound the worst case no matter what the
+model does. Repeated calls and error streaks catch a stuck run early, before it reaches a cap.
+
+### Ending gracefully
+
+When a cap is hit, the loop can stop at once or give the model one last turn to answer with
+what it has: the history plus a message that the budget is spent, with only the answer tool
+offered. A graceful finish turns many would-be failures into usable, if less certain,
+answers. Whatever it returns, the run still records that a limit was hit.
+
+### Record why it stopped
+
+A run's result carries its stop reason. A run that hit its step limit and then answered is not
+the same outcome as one that answered on step three, even if both answers are right. Evals
+should count stop reasons: a rising share of capped runs is often the first sign of a broken
+tool or a regression in the prompt.
+
+### Choosing the limits
+
+Set limits from data, not guesses. Run the agent on representative tasks, look at how many
+steps and tokens the successful runs used, and set each cap comfortably above the highest of
+them. A cap that cuts off successful runs costs accuracy; one far above any successful run
+only lets failures cost more.
