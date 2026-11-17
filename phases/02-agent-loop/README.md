@@ -150,3 +150,68 @@ has to be requested whenever tools are sent:
 ```python
 params["include"] = ["reasoning.encrypted_content"]
 ```
+
+## 2.2 The agent loop
+
+### The loop
+
+An agent is a model, a set of tools, instructions, and a loop that connects them:
+
+```
+messages = [task]
+repeat:
+    response = model(instructions, messages, tools)
+    append the whole response to messages     # text, reasoning, and tool calls
+    if the response has no tool calls: done   # its text is the answer
+    run every tool call
+    append all the results to messages, as one user turn
+```
+
+The model decides what happens next at every step; the code only executes. That is the
+difference from a **workflow**, where code fixes the sequence of steps and the model fills in
+each one. Workflows are cheaper and more predictable; agents handle tasks whose steps can't be
+known in advance. Use the simplest one that works
+([Anthropic, 2024](https://www.anthropic.com/engineering/building-effective-agents)).
+
+### Reasoning and acting
+
+The pattern of alternating thought and action was named **ReAct**
+([Yao et al., 2022](https://arxiv.org/abs/2210.03629)): the model reasons about what it knows,
+acts to learn more, observes the result, and repeats. Early implementations prompted for it
+with "Thought: / Action: / Observation:" text formats and parsed the output. Current models
+do it natively: reasoning happens in thinking tokens, actions are tool calls, and
+observations are tool results. Text formats are no longer needed.
+
+### Running the tools
+
+For each tool call, the loop:
+
+1. **Finds the tool by name.** An unknown name is an error result, not a crash.
+2. **Validates the arguments** against the tool's schema. Invalid arguments are an error
+   result that says what was wrong, so the model can retry.
+3. **Runs it** and turns the output into text. An exception inside the tool is an error
+   result too.
+
+Every call gets exactly one result, with its call ID, and all results from one response go
+back together. Calls in one response are independent by construction (the model issued them
+without seeing each other's results), so they can run concurrently.
+
+### What the loop costs
+
+Every step resends the whole history: instructions, tool definitions, the task, and every
+earlier call and result. Input grows with each step, and total input grows roughly with the
+square of the number of steps (1.1). Keeping the history append-only makes each request
+extend the previous one, so prompt caching can serve most of it (1.7). Large tool outputs are
+the usual culprit when a loop gets expensive; 2.4 covers keeping them small.
+
+### Getting a usable answer
+
+The loop ends when the model answers without calling a tool. For a program to use that
+answer, it needs a defined shape. Two ways:
+
+- **Structured output on the answer**, as in 1.5. "Done" stays implicit: the model ends by
+  not calling a tool, and any plain-text reply ends the loop too.
+- **An answer tool**: a tool whose arguments are the answer's schema, such as
+  `submit_decision`. Calling it ends the loop. "Done" becomes an explicit action whose
+  arguments are validated like any other call, so a malformed answer goes back to the model
+  as an error result instead of ending the run.
