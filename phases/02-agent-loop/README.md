@@ -344,3 +344,96 @@ Set limits from data, not guesses. Run the agent on representative tasks, look a
 steps and tokens the successful runs used, and set each cap comfortably above the highest of
 them. A cap that cuts off successful runs costs accuracy; one far above any successful run
 only lets failures cost more.
+
+### In the code
+
+Each row of the stop-conditions table is one value of `AgentStopReason`, and every run
+records one in `AgentRun.stop_reason` (`core/src/core/agent.py`):
+
+```python
+AgentStopReason = Literal[
+    "answered",  # the answer tool was called with valid arguments
+    "replied",  # the model ended without calling a tool
+    "provider_stop",  # the response was cut off or refused and requested nothing
+    "max_steps",
+    "token_budget",
+    "repeated_call",
+    "error_streak",
+]
+```
+
+The caps are settings, so each agent can set them from its own data:
+
+```python
+@dataclass(frozen=True)
+class Limits:
+    max_steps: int = 20  # model calls, not counting the graceful last turn
+    max_tokens: int = 200_000  # input plus output across all steps
+    max_repeats: int = 3  # runs of one identical call
+    max_error_streak: int = 3  # error results in a row
+    graceful: bool = True
+```
+
+The loop checks each condition where the table says. `run.completions` holds one entry per
+model call so far, `run.tokens` sums their usage, `step` makes one call and returns the tool
+calls it requested, and `stop` records the reason and returns the run. The caps come before
+the call, so the loop never makes a call it can't afford:
+
+```python
+while True:
+    if len(run.completions) >= limits.max_steps:
+        return stop("max_steps")
+    if run.tokens >= limits.max_tokens:
+        return stop("token_budget")
+    calls = step(specs)
+    if not calls:
+        last = run.completions[-1].response
+        return stop("provider_stop" if last.stop_reason in PROVIDER_STOPS else "replied")
+```
+
+`PROVIDER_STOPS` holds the normalized stop reasons for a cut-off or refused reply (1.2):
+`max_tokens` and `refusal`. The stuck-run checks come after the tools run, because they depend
+on the results. `calls_seen` counts each call by `call_key`, and the error streak resets on
+any success:
+
+```python
+for result in results:
+    error_streak = error_streak + 1 if result.is_error else 0
+if max(calls_seen.values(), default=0) >= limits.max_repeats:
+    return stop("repeated_call")
+if error_streak >= limits.max_error_streak:
+    return stop("error_streak")
+```
+
+Two calls count as the same when they name the same tool with the same arguments, whatever
+the key order or spacing of the JSON:
+
+```python
+def call_key(call: ToolCall) -> tuple[str, str]:
+    try:
+        arguments = json.dumps(json.loads(call.arguments), sort_keys=True)
+    except json.JSONDecodeError:
+        arguments = call.arguments
+    return call.name, arguments
+```
+
+On a cap, `stop` gives the model its graceful last turn: a message saying why the run is
+ending, then one call that offers only the answer tool. `CAPS` is the set of the four cap
+reasons, and `take_answer` stores a valid answer, returning `None` when it did. The stop
+reason stays the cap's even when that turn produces an answer:
+
+```python
+def stop(reason: AgentStopReason) -> AgentRun:
+    run.stop_reason = reason
+    if reason in CAPS and limits.graceful and answer is not None:
+        note = f"Stop: {reason}. Call {answer.name} now with your best answer."
+        run.messages.append(Message.user(note))
+        for call in step([answer]):
+            if call.name == answer.name and take_answer(call) is None:
+                break
+    return run
+```
+
+The note follows the latest tool results, so the history has two user turns in a row.
+Anthropic combines consecutive turns of the same role into one, and OpenAI's input is a flat
+list of items, so both accept it.
