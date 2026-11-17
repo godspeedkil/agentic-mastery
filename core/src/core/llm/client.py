@@ -6,6 +6,8 @@ from collections.abc import Callable, Generator, Mapping
 from datetime import UTC, datetime
 from typing import Protocol
 
+from opentelemetry import trace
+from opentelemetry.trace import Span, SpanKind
 from pydantic import BaseModel, ConfigDict, PositiveFloat, PositiveInt, ValidationError
 
 from core.llm.errors import RetryableError, StructuredOutputError
@@ -74,6 +76,25 @@ class RetryPolicy(BaseModel):
         return rng.uniform(0, ceiling)
 
 
+tracer = trace.get_tracer("core.llm")
+
+
+def describe_completion(span: Span, completion: Completion) -> None:
+    """Set the GenAI attributes a finished call adds to its `chat` span."""
+    response, record = completion.response, completion.record
+    span.set_attributes(
+        {
+            "gen_ai.response.model": response.model,
+            "gen_ai.response.finish_reasons": [response.stop_reason],
+            "gen_ai.usage.input_tokens": record.usage.total_input_tokens,
+            "gen_ai.usage.output_tokens": record.usage.output_tokens,
+            "llm.attempts": record.attempt,
+        }
+    )
+    if record.cost_usd is not None:
+        span.set_attribute("llm.cost_usd", record.cost_usd)
+
+
 class LLMClient:
     def __init__(
         self,
@@ -114,8 +135,28 @@ class LLMClient:
         adapter = self._providers.get(provider)
         if adapter is None:
             raise ValueError(f"unknown provider {provider!r}; have {sorted(self._providers)}")
-        stream = stream or on_text is not None
+        with tracer.start_as_current_span(f"chat {request.model}", kind=SpanKind.CLIENT) as span:
+            span.set_attributes(
+                {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.provider.name": provider,
+                    "gen_ai.request.model": request.model,
+                }
+            )
+            completion = self._with_retries(
+                adapter, request, stream or on_text is not None, on_text, dict(labels or {})
+            )
+            describe_completion(span, completion)
+            return completion
 
+    def _with_retries(
+        self,
+        adapter: ProviderAdapter,
+        request: Request,
+        stream: bool,
+        on_text: Callable[[str], None] | None,
+        labels: dict[str, str],
+    ) -> Completion:
         delivered = False
 
         def deliver(text: str) -> None:
@@ -126,9 +167,7 @@ class LLMClient:
 
         for attempt in range(1, self._retry.max_attempts + 1):
             try:
-                return self._attempt(
-                    adapter, request, attempt, deliver if stream else None, dict(labels or {})
-                )
+                return self._attempt(adapter, request, attempt, deliver if stream else None, labels)
             except RetryableError as exc:
                 if delivered or attempt == self._retry.max_attempts:
                     raise
