@@ -617,3 +617,140 @@ to a corrected call; "Not found" leads to guessing.
 Tool definitions are prompts, and they change behavior the same way: test them on real tasks
 and read the transcripts. Wrong tool choices, repeated calls, and arguments in the wrong format
 usually trace back to a name, a description, or an error message.
+
+### In the code
+
+This section follows one invoice through the approval agent's tools. It is a scanned
+invoice whose text came out of OCR with letters in place of digits
+(`phases/02-agent-loop/data/cases.jsonl`, case `ap-011`):
+
+```
+KESTREL HARDWARE C0.
+lNVOICE KH-34O2
+P0: PO-1O42
+2 x bench grinder ........ $2,310.00
+T0TAL ................... $2,310.00
+```
+
+A run on it can go like this. Each reply is what the tool returns for that call:
+
+```mermaid
+sequenceDiagram
+    participant M as Model
+    participant T as Tools
+    M->>T: find_vendor(name="KESTREL HARDWARE C0.")
+    T-->>M: V-105 Kestrel Hardware Co., active, USD, similarity 0.91
+    M->>T: get_purchase_order(po_number="PO-1O42")
+    T-->>M: Error: PO numbers are PO- followed by digits only
+    M->>T: get_purchase_order(po_number="PO-1042")
+    T-->>M: found: V-105, open, USD 2,310.00
+    M->>T: find_paid_invoices(vendor_id="V-105", invoice_number="KH-3402")
+    T-->>M: no invoices
+    M->>T: submit_decision(decision="approve", reasons=[])
+```
+
+**1. The tool set.** `make_tools` builds the three lookup tools over one `Records`, the
+vendors, purchase orders, and paid invoices loaded from `data/`
+(`phases/02-agent-loop/src/p02/tools.py`). Each is a `Tool` (2.2): a `ToolSpec` plus the
+function that runs it. The answer tool, `SUBMIT_DECISION`, is a `ToolSpec` on its own.
+
+**2. Arguments the model reads.** Each tool's arguments are a Pydantic model whose
+docstrings become the descriptions in the schema, so the model sees the expected format
+next to each field. Names say exactly what they hold:
+
+```python
+class GetPurchaseOrder(Arguments):
+    po_number: str
+    """As written on the invoice: PO-1042, po 1042, and 1042 all work."""
+
+
+class FindPaidInvoices(Arguments):
+    vendor_id: str
+    """The vendor's ID from find_vendor, such as V-101."""
+    invoice_number: str | None
+    """Optional. Matches regardless of punctuation, an INV prefix, or leading zeros."""
+```
+
+`Arguments` is the shared base class that turns those docstrings into descriptions.
+
+**3. Find the vendor by name.** The model has a name, so the tool searches by name. Both
+names are reduced by `name_key`, which lowercases them and drops punctuation and legal
+suffixes such as "Ltd", then compared with `SequenceMatcher`, the standard library's
+string similarity (1.0 for identical strings). The tool returns up to three matches with
+their scores and leaves the judgment to the model, which matters when two companies have
+similar names:
+
+```python
+matches = [
+    {
+        "vendor_id": vendor.id,
+        "name": vendor.name,
+        "status": vendor.status,
+        "currency": vendor.currency,
+        "similarity": round(score, 2),
+    }
+    for score, vendor in scored[:MAX_VENDOR_MATCHES]
+    if score >= MIN_SIMILARITY
+]
+```
+
+`scored` is every vendor paired with its score, best first. The keys repeat the argument
+names, so `vendor_id` from this result goes straight into the next call.
+
+**4. Look up the PO, and recover from a bad number.** `normalize_po` turns `po 1042`,
+`PO1042`, and `1042` into `PO-1042`, so formatting never causes a miss. A letter is a
+different matter: "PO-1O42" can't be a PO number, so the tool raises an error that says
+what PO numbers look like and what to check. `run_tool` (2.2) turns it into the error
+result the model reads, and the model retries with the corrected number:
+
+```python
+number = normalize_po(args.po_number)
+if not re.fullmatch(r"PO-\d+", number):
+    raise ValueError(
+        f"{args.po_number!r} is not a PO number: they are PO- followed by digits only, "
+        "such as PO-1001. Check the invoice for letters misread as digits."
+    )
+po = pos.get(number)
+if po is None:
+    return json.dumps({"found": False, "note": f"No purchase order {number} exists."})
+```
+
+A well-formed number that matches nothing is not an error: "this PO doesn't exist" is a
+finding the policy needs, and reporting it as an error would push the model to retry a
+correct lookup. `pos` maps PO numbers to purchase orders. A found PO comes back with its
+vendor's name as well as its ID, so a PO belonging to another vendor is visible without a
+second call.
+
+**5. Check for an earlier payment.** `normalize_invoice_number` reduces both sides to
+letters and digits, without an "INV" prefix or leading zeros, so "INV-0042" and "42"
+match. The list is capped, and a cut-off list says so and how to narrow it:
+
+```python
+result: dict = {"invoices": [i.model_dump() for i in paid[:MAX_INVOICES]]}
+if len(paid) > MAX_INVOICES:
+    result["note"] = f"Showing {MAX_INVOICES} of {len(paid)}. Pass invoice_number to narrow."
+```
+
+**6. Submit the decision.** The answer tool's arguments hold the decision and the reasons,
+both closed sets from the policy (`Decision` and `Reason`), plus the vendor and PO the
+agent settled on, which show where a wrong decision went wrong:
+
+```python
+class SubmitDecision(Arguments):
+    decision: Decision
+    reasons: list[Reason]
+    vendor_id: str | None
+    po_number: str | None
+    note: str
+```
+
+### Choices and alternatives
+
+| We chose | Alternatives | When they win |
+| --- | --- | --- |
+| Records loaded into memory and searched in Python | Tools as thin clients over the system of record: an ERP or accounts-payable system's API, SQL against a read replica, or an MCP server that wraps the system (Phase 5) | Always, at production scale. The data lives in systems other teams own, so a tool is an adapter with its own credentials, timeouts, retries, pagination, and rate limits. |
+| Vendor matching on name similarity | A search index (trigram or full-text search in a database); embeddings (Phase 3); matching on hard identifiers such as a tax ID or the bank account payment goes to | Hard identifiers whenever the document carries them: names are the weakest signal, and a wrong vendor match on a payment is a fraud risk. A search index for fuzzy lookup over thousands of vendors. Embeddings when names vary in meaning, not just spelling. |
+| Three narrow lookup tools | One `check_invoice` tool that runs the policy in code and returns the failed checks; a code-execution tool over the data | Running the policy in code whenever the policy is fixed: it can't skip a check or misread a number. Narrow tools when the agent must decide which checks apply, or handle cases the policy doesn't cover. |
+| A static tool set, built at startup | Tools chosen per request: by user permissions, tenant, or task; discovered from MCP servers; or searched for when there are too many to send every time | Per-request tool sets once tools number in the dozens, or when what a user may do differs from user to user. |
+| Read-only tools; the decision is the answer | Tools that act: approving the payment in the AP system, with idempotency keys, amount thresholds, and human approval for large amounts (Phases 4 and 8) | Whenever the agent's output is an action rather than a recommendation. Permissions are enforced in the tool, never only in the prompt. |
+| JSON strings as tool output | Short labeled text; Markdown tables for lists of records | Labeled text or tables when results are read more than parsed. Any format works if it is compact and consistent across tools. |
