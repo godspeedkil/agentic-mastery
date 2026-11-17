@@ -817,3 +817,137 @@ rules apply.
 - **Aggregates** across runs: steps per run, tool error rates, latency per tool, stop
   reasons.
 - **Building evals**: a failed trace becomes a test case (Phase 7).
+
+### In the code
+
+This section follows one agent run's trace from the root span down. Run on the OCR invoice
+from 2.4, with the model's replies scripted, the agent produces this tree (span names, with a
+few of their attributes):
+
+```
+invoke_agent invoice_approval      agent.stop_reason=answered, agent.steps=5
+├── chat claude-haiku-5-5
+├── execute_tool find_vendor
+├── chat claude-haiku-5-5
+├── execute_tool get_purchase_order      error.type=ValueError
+├── chat claude-haiku-5-5
+├── execute_tool get_purchase_order
+├── chat claude-haiku-5-5
+├── execute_tool find_paid_invoices
+├── chat claude-haiku-5-5
+└── execute_tool submit_decision
+```
+
+The model calls and the tool calls are siblings: each tool runs after the call that requested
+it has finished. The failed lookup is visible without reading any content, by its
+`error.type`.
+
+**1. Get a tracer.** Each module asks the OTel API for a tracer at import time, named after
+the module (`core/src/core/agent.py`, and `core/src/core/llm/client.py` with `"core.llm"`):
+
+```python
+tracer = trace.get_tracer("core.agent")
+```
+
+Until an application installs a tracer provider from the SDK, this tracer records nothing,
+so code that never configures tracing, such as the Phase 1 benchmark, runs unchanged.
+
+**2. The root span.** `run_agent` wraps the whole run in an `invoke_agent` span. Its
+attributes say what ran when it starts, and how it ended when it finishes. `loop` is the
+`while` loop from 2.2 and 2.3, and `run` the `AgentRun` it fills:
+
+```python
+with tracer.start_as_current_span(f"invoke_agent {name}") as span:
+    span.set_attributes(
+        {
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.agent.name": name,
+            "gen_ai.provider.name": provider,
+            "gen_ai.request.model": request.model,
+        }
+    )
+    loop()
+    span.set_attributes(
+        {
+            "agent.stop_reason": run.stop_reason or "",
+            "agent.steps": len(run.completions),
+            ...  # total input and output tokens
+        }
+    )
+    return run
+```
+
+`start_as_current_span` makes the span the current one, so spans opened inside `loop` become
+its children without the span being passed to them. Attributes outside the conventions carry
+an `agent.` or `llm.` prefix, so they can't be mistaken for official names.
+
+**3. Model calls.** Every model call goes through `LLMClient.complete` (Phase 1), so that is
+where the `chat` span is opened, wrapping all of the call's retry attempts. `_with_retries`
+is the retry loop, and `describe_completion` adds the response's model, stop reason, token
+counts, attempts, and cost once the call returns:
+
+```python
+with tracer.start_as_current_span(f"chat {request.model}", kind=SpanKind.CLIENT) as span:
+    span.set_attributes(
+        {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": provider,
+            "gen_ai.request.model": request.model,
+        }
+    )
+    completion = self._with_retries(...)
+    describe_completion(span, completion)
+    return completion
+```
+
+`SpanKind.CLIENT` marks a call to another service. Placing the span in the client means
+single calls outside any agent are traced the same way.
+
+**4. Tool calls.** `run_tool` opens an `execute_tool` span around `execute`, which runs the
+call as in 2.2 and also reports what kind of failure, if any, occurred: `unknown_tool`,
+`invalid_arguments`, or the exception's class name. `describe_tool_call` sets the span's
+attributes:
+
+```python
+span.set_attributes(
+    {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.name": call.name,
+        "gen_ai.tool.call.id": call.id,
+    }
+)
+if error_type is not None:
+    span.set_attribute("error.type", error_type)
+    span.set_status(StatusCode.ERROR)
+if capture_content:
+    span.set_attribute("gen_ai.tool.call.arguments", call.arguments)
+    span.set_attribute("gen_ai.tool.call.result", result.content)
+```
+
+A tool error isn't an exception (2.1), so the span is marked as failed explicitly.
+`capture_content` is a `run_agent` argument, off by default: arguments and results enter the
+trace only when the caller allows it. A call to the answer tool gets an `execute_tool` span
+the same way.
+
+**5. Where the spans go.** None of the code above chooses a destination. The application
+does, once, by installing a tracer provider with a span processor and an exporter. The tests
+keep spans in memory (`core/tests/test_tracing.py`):
+
+```python
+provider = TracerProvider()
+provider.add_span_processor(SimpleSpanProcessor(InMemorySpanExporter()))
+trace.set_tracer_provider(provider)
+```
+
+`SimpleSpanProcessor` hands each span to the exporter as soon as it ends.
+
+### Choices and alternatives
+
+| We chose | Alternatives | When they win |
+| --- | --- | --- |
+| Spans written by hand with the OTel API | Instrumentation packages that patch the provider SDKs: OpenTelemetry's own `opentelemetry-instrumentation-openai-v2`, and community collections such as OpenLLMetry and OpenInference that also cover Anthropic and agent frameworks | Packages for model calls when you use the provider SDKs directly: one line of setup, and they follow the conventions as they change. Hand-written spans for your own structure, such as the agent run and its stop reason, which no package can know. Most real systems combine both. |
+| OpenTelemetry | A tracing vendor's own SDK or decorators (Langfuse, LangSmith, and others); a framework's callbacks | A vendor SDK for its extra features, such as prompt management, datasets, and evaluation in one product, when switching backends later is unlikely. OTel when traces should reach any backend, and sit alongside the rest of a service's traces. |
+| Spans exported in-process, one at a time | A `BatchSpanProcessor` exporting over OTLP, OTel's wire protocol, to a Collector: a separate service that buffers, filters, samples, and forwards spans to one or more backends | The Collector setup in production: export doesn't slow the agent, a backend outage doesn't lose spans, and sensitive attributes can be removed in one place. In-process export for tests and local runs. |
+| Every run traced | Sampling: keeping a fraction of traces, or keeping all failed and slow runs and a sample of the rest | Sampling at high volume, where storing every trace costs more than it tells you. |
+| Content left out unless allowed | Content always recorded; content redacted by a processor before export | Always recorded during development and evaluation. Redaction where content is useful but contains personal data. |
+| Traces alongside the Phase 1 call ledger | Traces only; metrics as a third signal, such as token usage and latency histograms | The ledger stays the source for cost, because it records every attempt even when tracing is off. Metrics for dashboards and alerts, which need aggregates rather than individual runs. |
