@@ -151,6 +151,16 @@ has to be requested whenever tools are sent:
 params["include"] = ["reasoning.encrypted_content"]
 ```
 
+### Choices and alternatives
+
+| We chose | Alternatives | When they win |
+| --- | --- | --- |
+| Our own tool types, with one adapter per provider | The provider SDK's helpers: Anthropic's SDK has a `@beta_tool` decorator and a tool runner that executes the loop; the OpenAI Agents SDK does the same for OpenAI models. Or a framework's tool layer (LangChain, Pydantic AI) or a gateway such as LiteLLM that maps every provider to one format. | SDK helpers when one provider is enough: less code, and new provider features arrive first. A framework or gateway when you want its integrations and can accept its abstractions. Your own layer when you need several providers and full control over what is sent and logged, as here. |
+| Arguments defined as a Pydantic class | A JSON Schema written by hand, or a schema derived from a function's signature and docstring (what most `@tool` decorators do) | Derived schemas for quick prototypes. A class when the same shape is validated in several places, or reused across tools. |
+| Strict mode on every tool | Non-strict schemas, validated only after the call | Non-strict when a schema needs keywords strict mode doesn't support. Validation runs either way: strict mode guarantees shape, not values. |
+| Stateless calls: the client resends the whole history and carries reasoning itself | Server-side state: OpenAI's Responses API can store a response and continue from it with `previous_response_id`, so only the new turn is sent | Server-side state for simpler code and smaller requests, when storing conversations with the provider is acceptable. Stateless when data retention rules forbid storage, or to keep conversations portable across providers. |
+| Parallel calls allowed, `tool_choice` left on `auto` | Parallel calls turned off; a forced tool choice | Sequential calls when one call's result decides the next and the model tends to guess ahead. Forcing a tool for a fixed first step, where the model allows it. |
+
 ## 2.2 The agent loop
 
 ### The loop
@@ -292,6 +302,17 @@ if answer is not None and call.name == answer.name:
         results.append(error_result(call, f"Error: invalid answer.\n{exc}"))
         continue
 ```
+
+### Choices and alternatives
+
+| We chose | Alternatives | When they win |
+| --- | --- | --- |
+| An agent loop for a task with a fixed policy | A **workflow**: extract the fields with structured output (Phase 1), then apply the policy in code. Or a **hybrid**: the workflow handles clean cases and hands the rest to an agent. | The workflow whenever the steps are known in advance: it is cheaper, faster, deterministic, and easy to audit. The hybrid for most real document processing. A pure agent only when the steps can't be known in advance. This phase's lab measures the workflow against the agent on the same cases. |
+| A hand-written loop | The SDK tool runners above; agent frameworks such as the OpenAI Agents SDK; graph frameworks such as LangGraph (Phase 4) | A framework when you need what it adds (handoffs between agents, tracing, persistence, human approval steps) and can accept its abstractions. Your own loop when it is small and you need control over every step, or to learn what the frameworks do. |
+| An answer tool | Structured output on the final turn; free text parsed afterward | Structured output when there's no risk of the model ending early with prose. Free text only when a person reads the answer. |
+| Tools run one at a time | Concurrent tool calls, with threads or `asyncio` | Concurrency when tools are slow network calls and the model issues several at once. |
+| A synchronous loop, history kept in memory | An `async` loop; history persisted after every step, so a crashed run can resume (durable execution, Phase 9) | `async` in a service running many agents at once. Persistence whenever a run is long, expensive, or waits on people. |
+| The full history resent every step | Compaction: summarizing or dropping old turns (Phase 3); provider-side context management | Compaction once histories approach the context window, or when old tool results are large and no longer needed. |
 
 ## 2.3 Stopping
 
@@ -437,6 +458,16 @@ def stop(reason: AgentStopReason) -> AgentRun:
 The note follows the latest tool results, so the history has two user turns in a row.
 Anthropic combines consecutive turns of the same role into one, and OpenAI's input is a flat
 list of items, so both accept it.
+
+### Choices and alternatives
+
+| We chose | Alternatives | When they win |
+| --- | --- | --- |
+| A stop reason on the result | An exception when a limit is hit: the OpenAI Agents SDK raises `MaxTurnsExceeded`, and LangGraph raises `GraphRecursionError` | Exceptions when a capped run should halt the program. A recorded reason when capped runs are an expected outcome to count and handle, as in evals and batch jobs. |
+| Caps on steps and tokens | A cap in dollars; a wall-clock timeout for the run and for each tool | A dollar cap when models with different prices share one budget. Timeouts in any service with a latency target, and for any tool that calls the network. |
+| Exact-repeat detection | Detecting near-repeats (the same tool with similar arguments); a progress check, such as a cheap model asked whether the run is still moving forward | Near-repeat and progress checks for long, open-ended tasks, where loops rarely repeat exactly. Exact matching for short tasks with structured arguments, as here. |
+| A graceful last turn | A hard stop; handing the run to a person, with the transcript, through a review queue | A review queue in most real approval systems: a capped run is a case the agent couldn't settle, and a person should see it. A hard stop when a partial answer is worse than none. |
+| Limits set in code, per agent | Limits configured per deployment or per tenant, and changed without a release | Configuration once several agents or customers share the same loop and need different budgets. |
 
 ## 2.4 Tool design
 
