@@ -754,3 +754,66 @@ class SubmitDecision(Arguments):
 | A static tool set, built at startup | Tools chosen per request: by user permissions, tenant, or task; discovered from MCP servers; or searched for when there are too many to send every time | Per-request tool sets once tools number in the dozens, or when what a user may do differs from user to user. |
 | Read-only tools; the decision is the answer | Tools that act: approving the payment in the AP system, with idempotency keys, amount thresholds, and human approval for large amounts (Phases 4 and 8) | Whenever the agent's output is an action rather than a recommendation. Permissions are enforced in the tool, never only in the prompt. |
 | JSON strings as tool output | Short labeled text; Markdown tables for lists of records | Labeled text or tables when results are read more than parsed. Any format works if it is compact and consistent across tools. |
+
+## 2.5 Tracing
+
+### Why the answer isn't enough
+
+A wrong decision is usually made several steps before it is reported. A vendor matched to the
+wrong company at step 1 makes every later step consistent and wrong; a misread PO number
+turns into a confident `po_not_found`. The final answer shows that something went wrong, not
+where. To find out, you need the run's **trajectory**: every model call and tool call, in
+order, with what went in and what came out.
+
+### What to record
+
+| Level | Record | Used for |
+| --- | --- | --- |
+| Run | the task, the model and settings, the limits, the stop reason, the answer, total tokens, cost, and time | Comparing runs; counting outcomes |
+| Model call | the model, tokens in and out, latency, the stop reason, the tool calls it requested | Finding slow, expensive, or cut-off steps |
+| Tool call | the tool, the arguments, the result, whether it was an error, and how long it took | Finding wrong calls, bad arguments, and tools that fail |
+
+Each record links to its parent, so a run reads as a tree: the run, its model calls, and each
+call's tools.
+
+### Traces and spans
+
+**OpenTelemetry** (OTel) is the open standard for this. A **trace** is one run; a **span** is
+one timed operation inside it, with a name, a start and end time, a parent, and
+**attributes**: key-value pairs describing it. Spans nest, so the tree in the table above is
+a trace.
+
+OTel separates two things. Code is **instrumented** with the OTel API: it opens spans and
+sets attributes. Where the spans go is **configured** separately, with the SDK and an
+**exporter**: a file, the console, or a tracing backend such as Jaeger, Langfuse, or a
+commercial observability service. Instrumented code with no SDK configured records nothing
+and costs almost nothing, so libraries can instrument freely and applications decide.
+
+### Shared names for GenAI spans
+
+OTel's **GenAI semantic conventions** name the spans and attributes for model and agent
+operations, so traces from different libraries look alike to any backend:
+
+- an **agent run** is an `invoke_agent` span; each **model call** inside it a `chat` span,
+  named `chat {model}`; each **tool call** an `execute_tool` span, named
+  `execute_tool {tool}`.
+- attributes include `gen_ai.operation.name`, `gen_ai.provider.name`,
+  `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`,
+  `gen_ai.tool.name`, and `gen_ai.tool.call.id`.
+
+The conventions are still marked **Development**, and names have changed between versions
+(`gen_ai.provider.name` replaced `gen_ai.system`), so pin the version you follow.
+
+### Content is sensitive
+
+Prompts, tool arguments, and tool results can contain personal or confidential data, and the
+conventions treat recording them as opt-in. Decide per deployment what content a trace may
+hold: full content during development and evaluation, IDs and sizes only where privacy
+rules apply.
+
+### What traces are for
+
+- **Debugging** one run: read its tree and find the first step that went wrong.
+- **Aggregates** across runs: steps per run, tool error rates, latency per tool, stop
+  reasons.
+- **Building evals**: a failed trace becomes a test case (Phase 7).
